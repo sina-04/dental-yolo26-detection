@@ -1,0 +1,25 @@
+{
+  "status": "pass",
+  "counts": {
+    "train": {
+      "images": 11481,
+      "labels": 11481,
+      "instances": 132984
+    },
+    "val": {
+      "images": 2192,
+      "labels": 2192,
+      "instances": 16850
+    },
+    "test": {
+      "images": 1472,
+      "labels": 1472,
+      "instances": 8758
+    }
+  },
+  "class_count": 38,
+  "patient_group_cross_split": 0,
+  "exact_hash_cross_split": 0,
+  "listed_near_duplicate_cross_split": 0,
+  "failures": []
+}

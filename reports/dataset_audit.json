@@ -1,0 +1,40 @@
+{
+  "seed": 42,
+  "dataset_versions": {
+    "dental_anatomy": 1,
+    "dental_disease": 6
+  },
+  "licenses": {
+    "dental_anatomy_kaggle": "CC BY-SA 4.0",
+    "dental_anatomy_embedded_roboflow": "CC BY 4.0",
+    "dental_disease": "Apache 2.0"
+  },
+  "source_counts": {
+    "anatomy": 724,
+    "disease": 13875
+  },
+  "split_counts": {
+    "train": 10935,
+    "val": 2192,
+    "test": 1472
+  },
+  "class_count": 38,
+  "patient_groups": 6036,
+  "patient_group_leakage": 0,
+  "exact_duplicates_removed": 57,
+  "near_duplicate_candidates": 500,
+  "records_regrouped_by_identical_perceptual_hash": 12,
+  "anatomy_records_regrouped_by_phash_distance_le_2": 5,
+  "polygon_annotations_converted": 136891,
+  "augmented_training_images": 546,
+  "issue_counts": {
+    "clipped_box": 51,
+    "empty_annotation": 45,
+    "tiny_box": 5,
+    "out_of_bounds": 3
+  },
+  "images_after_exact_deduplication": 14599,
+  "instances": 152208,
+  "raw_filename_privacy": "Raw disease filenames may contain names. Processed filenames and manifests use opaque IDs only.",
+  "manual_audit_status": "Class-stratified visual sheets generated for human/clinical review; automated checks are complete."
+}
