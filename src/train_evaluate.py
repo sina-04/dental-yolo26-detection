@@ -107,6 +107,7 @@ def create_runtime_data_yaml(max_train_images: int | None, seed: int) -> tuple[P
 
 def train_experiment(
     name: str,
+    model_checkpoint: str,
     epochs: int,
     imgsz: int,
     batch: int,
@@ -115,16 +116,28 @@ def train_experiment(
     augmented: bool,
     data_yaml: Path,
     train_images: int,
+    workers: int,
+    cache: bool | str,
+    amp: bool,
+    patience: int,
+    save_period: int,
+    resume: bool,
 ) -> dict[str, Any]:
-    model = YOLO("yolo26n.pt")
+    run_dir = RUNS / name
+    existing_last = run_dir / "weights" / "last.pt"
+    results_csv = run_dir / "results.csv"
+    completed_before = sum(1 for _ in results_csv.open(encoding="utf-8")) - 1 if results_csv.exists() else 0
+    already_complete = completed_before >= epochs and (run_dir / "weights" / "best.pt").exists()
+    checkpoint = str(existing_last) if resume and existing_last.exists() and not already_complete else model_checkpoint
+    model = YOLO(checkpoint)
     parameters: dict[str, Any] = {
         "data": str(data_yaml),
         "epochs": epochs,
         "imgsz": imgsz,
         "batch": batch,
         "device": device,
-        "workers": 0 if platform.system() == "Windows" else 4,
-        "patience": max(2, min(20, epochs // 3)),
+        "workers": workers,
+        "patience": patience,
         "optimizer": "auto",
         "weight_decay": 0.0005,
         "mosaic": 0.0,
@@ -144,26 +157,46 @@ def train_experiment(
         "seed": seed,
         "deterministic": True,
         "plots": True,
-        "cache": False,
+        "cache": cache,
+        "amp": amp,
+        "save_period": save_period,
         "project": str(RUNS),
         "name": name,
         "exist_ok": True,
         "verbose": True,
     }
     started = time.monotonic()
-    model.train(**parameters)
+    if already_complete:
+        print(f"Skipping completed experiment {name}: {completed_before}/{epochs} epochs already present.", flush=True)
+        model = YOLO(str(run_dir / "weights" / "best.pt"))
+    elif resume and existing_last.exists():
+        print(f"Resuming {name} from {existing_last}", flush=True)
+        model.train(resume=True, epochs=epochs)
+    else:
+        model.train(**parameters)
     duration = time.monotonic() - started
-    save_dir = Path(model.trainer.save_dir)
+    save_dir = run_dir if already_complete else Path(model.trainer.save_dir)
     best = save_dir / "weights" / "best.pt"
     last = save_dir / "weights" / "last.pt"
     validation_model = YOLO(str(best))
-    metrics = validation_model.val(data=str(data_yaml), split="val", imgsz=imgsz, batch=batch, device=device, workers=0, plots=True)
+    metrics = validation_model.val(
+        data=str(data_yaml),
+        split="val",
+        imgsz=imgsz,
+        batch=batch,
+        device=device,
+        workers=workers,
+        plots=True,
+        project=str(RUNS),
+        name=f"{name}_val",
+        exist_ok=True,
+    )
     values = {key: float(value) for key, value in metrics.results_dict.items()}
     results_csv = save_dir / "results.csv"
     completed = sum(1 for _ in results_csv.open(encoding="utf-8")) - 1 if results_csv.exists() else epochs
     return {
         "name": name,
-        "model": "yolo26n.pt",
+        "model": model_checkpoint,
         "epochs_requested": epochs,
         "epochs_completed": completed,
         "imgsz": imgsz,
@@ -426,15 +459,31 @@ def environment_report(device: str) -> dict[str, Any]:
 
 
 def main() -> None:
+    global DATA_YAML, RUNS, REPORTS, ARTIFACTS
     parser = argparse.ArgumentParser(description="Train, select, test, infer, and analyze YOLO26 experiments.")
     parser.add_argument("--baseline-epochs", type=int, default=20)
     parser.add_argument("--tuned-epochs", type=int, default=30)
     parser.add_argument("--imgsz", type=int, default=512)
-    parser.add_argument("--batch", type=int, default=1)
+    parser.add_argument("--batch", type=int, default=8)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--max-train-images", type=int, default=None, help="Deterministic class-covered compute profile; validation/test stay complete.")
+    parser.add_argument("--model", default="yolo26n.pt", help="Ultralytics model checkpoint, for example yolo26s.pt on Colab.")
+    parser.add_argument("--data-yaml", type=Path, default=DATA_YAML)
+    parser.add_argument("--output-root", type=Path, default=ROOT, help="Root containing runs/, reports/, and artifacts/.")
+    parser.add_argument("--run-prefix", default="", help="Prefix added to experiment names, such as colab_t4.")
+    parser.add_argument("--workers", type=int, default=0 if platform.system() == "Windows" else 4)
+    parser.add_argument("--cache", choices=("false", "ram", "disk"), default="false")
+    parser.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--patience", type=int, default=12)
+    parser.add_argument("--save-period", type=int, default=1)
+    parser.add_argument("--resume", action="store_true", help="Resume incomplete experiments from their last checkpoint.")
     args = parser.parse_args()
+    DATA_YAML = args.data_yaml.resolve()
+    output_root = args.output_root.resolve()
+    RUNS = output_root / "runs"
+    REPORTS = output_root / "reports"
+    ARTIFACTS = output_root / "artifacts"
     if not DATA_YAML.exists():
         raise FileNotFoundError("Run src.prepare_dataset before training")
     names = load_names(DATA_YAML)
@@ -443,9 +492,27 @@ def main() -> None:
     REPORTS.mkdir(parents=True, exist_ok=True)
     ARTIFACTS.mkdir(parents=True, exist_ok=True)
 
+    cache: bool | str = False if args.cache == "false" else args.cache
+    model_slug = Path(args.model).stem.replace(".", "_")
+    prefix = f"{args.run_prefix.strip('_')}_" if args.run_prefix.strip("_") else ""
+    common = {
+        "model_checkpoint": args.model,
+        "imgsz": args.imgsz,
+        "batch": args.batch,
+        "device": device,
+        "seed": args.seed,
+        "data_yaml": runtime_data_yaml,
+        "train_images": train_images,
+        "workers": args.workers,
+        "cache": cache,
+        "amp": args.amp,
+        "patience": args.patience,
+        "save_period": args.save_period,
+        "resume": args.resume,
+    }
     experiments = [
-        train_experiment("baseline_yolo26n", args.baseline_epochs, args.imgsz, args.batch, device, args.seed, False, runtime_data_yaml, train_images),
-        train_experiment("tuned_yolo26n_medical_aug", args.tuned_epochs, args.imgsz, args.batch, device, args.seed, True, runtime_data_yaml, train_images),
+        train_experiment(f"{prefix}baseline_{model_slug}", epochs=args.baseline_epochs, augmented=False, **common),
+        train_experiment(f"{prefix}tuned_{model_slug}_medical_aug", epochs=args.tuned_epochs, augmented=True, **common),
     ]
     map_key = "metrics/mAP50-95(B)"
     selected = max(experiments, key=lambda experiment: experiment["validation"].get(map_key, float("-inf")))
@@ -459,7 +526,7 @@ def main() -> None:
     write_csv(REPORTS / "threshold_analysis.csv", threshold_rows, list(threshold_rows[0]))
     plot_thresholds(threshold_rows)
 
-    test_metrics = final_model.val(data=str(runtime_data_yaml), split="test", imgsz=args.imgsz, batch=args.batch, device=device, workers=0, plots=True, project=str(RUNS), name="final_test", exist_ok=True)
+    test_metrics = final_model.val(data=str(runtime_data_yaml), split="test", imgsz=args.imgsz, batch=args.batch, device=device, workers=args.workers, plots=True, project=str(RUNS), name="final_test", exist_ok=True)
     test_standard = {key: float(value) for key, value in test_metrics.results_dict.items()}
     test_predictions = cache_predictions(final_model, "test", args.imgsz, device)
     test_custom, class_rows, per_image = aggregate_custom_metrics(test_predictions, "test", selected_threshold, len(names))

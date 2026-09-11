@@ -4,7 +4,8 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from src.prepare_dataset import parse_label, patient_key
+from src.colab_workflow import build_parser
+from src.prepare_dataset import parse_label, patient_key, resolve_dataset_root
 
 
 class PipelineTests(unittest.TestCase):
@@ -37,6 +38,23 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertNotIn("patient", first)
         self.assertNotIn("name", first)
+
+    def test_dataset_root_is_resolved_from_nested_colab_download(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            nested = Path(directory) / "download" / "Dental Dataset"
+            nested.mkdir(parents=True)
+            nested.joinpath("data.yaml").write_text(
+                "names:\n" + "".join(f"  {index}: class_{index}\n" for index in range(7)),
+                encoding="utf-8",
+            )
+            resolved = resolve_dataset_root(None, [Path(directory)], 7, "test")
+        self.assertEqual(nested.resolve(), resolved)
+
+    def test_colab_profile_defaults_to_full_data_yolo26s(self) -> None:
+        args = build_parser().parse_args([])
+        self.assertEqual("yolo26s.pt", args.model)
+        self.assertIsNone(getattr(args, "max_train_images", None))
+        self.assertEqual(640, args.imgsz)
 
 
 if __name__ == "__main__":

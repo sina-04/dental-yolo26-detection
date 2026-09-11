@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import csv
 from collections import defaultdict
 import json
@@ -16,13 +17,19 @@ REPORTS = ROOT / "reports"
 
 
 def main() -> None:
-    configuration = yaml.safe_load((DATASET / "data.yaml").read_text(encoding="utf-8"))
+    parser = argparse.ArgumentParser(description="Verify a prepared dental YOLO dataset.")
+    parser.add_argument("--dataset", type=Path, default=DATASET)
+    parser.add_argument("--reports-root", type=Path, default=REPORTS)
+    args = parser.parse_args()
+    dataset = args.dataset.resolve()
+    reports = args.reports_root.resolve()
+    configuration = yaml.safe_load((dataset / "data.yaml").read_text(encoding="utf-8"))
     class_count = len(configuration["names"])
     failures: list[str] = []
     counts: dict[str, dict[str, int]] = {}
     for split in ("train", "val", "test"):
-        image_stems = {path.stem for path in (DATASET / "images" / split).iterdir() if path.suffix.lower() in IMAGE_EXTENSIONS}
-        label_paths = list((DATASET / "labels" / split).glob("*.txt"))
+        image_stems = {path.stem for path in (dataset / "images" / split).iterdir() if path.suffix.lower() in IMAGE_EXTENSIONS}
+        label_paths = list((dataset / "labels" / split).glob("*.txt"))
         label_stems = {path.stem for path in label_paths}
         if image_stems != label_stems:
             failures.append(f"{split}: image/label stem mismatch")
@@ -42,7 +49,7 @@ def main() -> None:
                 instances += 1
         counts[split] = {"images": len(image_stems), "labels": len(label_stems), "instances": instances}
 
-    manifest = list(csv.DictReader((REPORTS / "dataset_manifest.csv").open(encoding="utf-8")))
+    manifest = list(csv.DictReader((reports / "dataset_manifest.csv").open(encoding="utf-8")))
     by_patient: dict[str, set[str]] = defaultdict(set)
     by_hash: dict[str, set[str]] = defaultdict(set)
     split_by_id: dict[str, str] = {}
@@ -52,7 +59,7 @@ def main() -> None:
         split_by_id[row["image_id"]] = row["split"]
     patient_leakage = sum(len(splits) > 1 for splits in by_patient.values())
     exact_hash_leakage = sum(bool(digest) and len(splits) > 1 for digest, splits in by_hash.items())
-    near_pairs = list(csv.DictReader((REPORTS / "near_duplicate_candidates.csv").open(encoding="utf-8")))
+    near_pairs = list(csv.DictReader((reports / "near_duplicate_candidates.csv").open(encoding="utf-8")))
     near_leakage = sum(split_by_id[row["left"]] != split_by_id[row["right"]] for row in near_pairs)
     if patient_leakage:
         failures.append(f"{patient_leakage} patient groups cross splits")
@@ -69,7 +76,7 @@ def main() -> None:
         "listed_near_duplicate_cross_split": near_leakage,
         "failures": failures,
     }
-    write_json(REPORTS / "dataset_verification.json", payload)
+    write_json(reports / "dataset_verification.json", payload)
     print(json.dumps(payload, indent=2))
     if failures:
         raise SystemExit(1)

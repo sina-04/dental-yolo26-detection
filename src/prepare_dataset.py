@@ -22,26 +22,39 @@ from src.common import IMAGE_EXTENSIONS, finite_unit, list_images, load_names, o
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-ANATOMY_ROOT = next(
-    path
-    for path in (
-        PROJECT_ROOT / "Dental Dataset" / "Dental Dataset",
-        PROJECT_ROOT / "raw" / "dental-anatomy" / "Dental Dataset",
-    )
-    if (path / "data.yaml").exists()
-)
-DISEASE_ROOT = next(
-    path
-    for path in (
-        PROJECT_ROOT / "YOLO & COCO" / "YOLO" / "YOLO",
-        PROJECT_ROOT / "raw" / "dental-disease" / "YOLO" / "YOLO",
-    )
-    if (path / "data.yaml").exists()
-)
 DISEASE_ARCHIVE = PROJECT_ROOT / "raw" / "dental-disease-v6.zip"
 OUTPUT_ROOT = PROJECT_ROOT / "dataset"
 REPORT_ROOT = PROJECT_ROOT / "reports"
 SEED = 42
+
+
+def dataset_class_count(path: Path) -> int | None:
+    """Return the number of classes in a YOLO data file, or None if invalid."""
+    try:
+        return len(load_names(path / "data.yaml"))
+    except (FileNotFoundError, KeyError, TypeError, ValueError, yaml.YAMLError):
+        return None
+
+
+def resolve_dataset_root(explicit: Path | None, candidates: list[Path], expected_classes: int, label: str) -> Path:
+    """Locate a YOLO dataset without relying on a machine-specific extraction path."""
+    search_roots = [explicit] if explicit else candidates
+    matches: list[Path] = []
+    for search_root in search_roots:
+        if search_root is None or not search_root.exists():
+            continue
+        direct = search_root.resolve()
+        if dataset_class_count(direct) == expected_classes:
+            matches.append(direct)
+        for data_yaml in search_root.rglob("data.yaml"):
+            root = data_yaml.parent.resolve()
+            if dataset_class_count(root) == expected_classes:
+                matches.append(root)
+    unique = sorted(set(matches), key=lambda path: (len(path.parts), str(path)))
+    if not unique:
+        searched = ", ".join(str(path) for path in search_roots if path is not None)
+        raise FileNotFoundError(f"Could not locate the {label} YOLO dataset ({expected_classes} classes) under: {searched}")
+    return unique[0]
 
 
 @dataclass
@@ -73,19 +86,22 @@ class Record:
     split: str = ""
 
 
-def extract_disease_yolo() -> None:
-    if DISEASE_ROOT.exists():
-        return
-    if not DISEASE_ARCHIVE.exists():
-        raise FileNotFoundError(f"Missing {DISEASE_ARCHIVE}")
+def extract_disease_yolo(archive_path: Path = DISEASE_ARCHIVE) -> Path:
+    """Extract the legacy disease archive and return its destination directory."""
     destination = PROJECT_ROOT / "raw" / "dental-disease"
+    existing = destination / "YOLO" / "YOLO"
+    if existing.exists():
+        return destination
+    if not archive_path.exists():
+        raise FileNotFoundError(f"Missing {archive_path}")
     destination.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(DISEASE_ARCHIVE) as archive:
+    with zipfile.ZipFile(archive_path) as archive:
         members = [name for name in archive.namelist() if name.replace("\\", "/").startswith("YOLO/YOLO/")]
         if not members:
             raise RuntimeError("The Kaggle archive does not contain YOLO/YOLO")
         for member in members:
             archive.extract(member, destination)
+    return destination
 
 
 def patient_key(source: str, stem: str) -> str:
@@ -448,6 +464,9 @@ def write_csv(path: Path, rows: list[dict[str, object]], fieldnames: list[str]) 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Audit, combine, split, and prepare both dental datasets.")
     parser.add_argument("--output", type=Path, default=OUTPUT_ROOT)
+    parser.add_argument("--reports-root", type=Path, default=REPORT_ROOT)
+    parser.add_argument("--anatomy-root", type=Path, help="Extracted anatomy dataset or a parent directory containing it.")
+    parser.add_argument("--disease-root", type=Path, help="Extracted disease dataset or a parent directory containing it.")
     parser.add_argument("--augment-fraction", type=float, default=0.15)
     parser.add_argument("--seed", type=int, default=SEED)
     parser.add_argument("--resume", action="store_true", help="Reuse/overwrite a previously generated output without deleting it.")
@@ -460,13 +479,22 @@ def main() -> None:
     if args.output.exists() and any(args.output.iterdir()) and not args.resume:
         raise FileExistsError(f"Refusing to overwrite non-empty output directory: {args.output}")
 
-    extract_disease_yolo()
-    anatomy_names = load_names(ANATOMY_ROOT / "data.yaml")
-    disease_names = load_names(DISEASE_ROOT / "data.yaml")
+    anatomy_root = resolve_dataset_root(
+        args.anatomy_root,
+        [PROJECT_ROOT / "Dental Dataset", PROJECT_ROOT / "raw" / "dental-anatomy"],
+        expected_classes=7,
+        label="dental anatomy",
+    )
+    disease_candidates = [PROJECT_ROOT / "YOLO & COCO", PROJECT_ROOT / "raw" / "dental-disease"]
+    if not args.disease_root and not any(path.exists() for path in disease_candidates) and DISEASE_ARCHIVE.exists():
+        disease_candidates.insert(0, extract_disease_yolo())
+    disease_root = resolve_dataset_root(args.disease_root, disease_candidates, expected_classes=31, label="panoramic disease")
+    anatomy_names = load_names(anatomy_root / "data.yaml")
+    disease_names = load_names(disease_root / "data.yaml")
     names = [f"anatomy_{slugify(name)}" for name in anatomy_names] + [f"disease_{slugify(name)}" for name in disease_names]
 
-    anatomy_records, anatomy_polygons = collect_source(ANATOMY_ROOT, "anatomy", 0, len(anatomy_names))
-    disease_records, disease_polygons = collect_source(DISEASE_ROOT, "disease", len(anatomy_names), len(disease_names))
+    anatomy_records, anatomy_polygons = collect_source(anatomy_root, "anatomy", 0, len(anatomy_names))
+    disease_records, disease_polygons = collect_source(disease_root, "disease", len(anatomy_names), len(disease_names))
     all_records = [record for record in anatomy_records + disease_records if not any(issue.startswith("corrupt_image") for issue in record.issues)]
     all_records, exact_duplicates = remove_exact_duplicates(all_records)
     perceptual_group_merges = merge_identical_perceptual_groups(all_records)
@@ -486,7 +514,7 @@ def main() -> None:
     for class_id in range(len(names)):
         sample = next((record for record in all_records if any(box.class_id == class_id for box in record.boxes)), None)
         if sample:
-            draw_sample(sample, names, REPORT_ROOT / "annotation_audit" / f"class_{class_id:02d}_{names[class_id]}.jpg")
+            draw_sample(sample, names, args.reports_root / "annotation_audit" / f"class_{class_id:02d}_{names[class_id]}.jpg")
 
     class_rows: list[dict[str, object]] = []
     for class_id, name in enumerate(names):
@@ -499,7 +527,7 @@ def main() -> None:
                 "images": sum(any(box.class_id == class_id for box in record.boxes) for record in subset),
                 "instances": sum(box.class_id == class_id for record in subset for box in record.boxes),
             })
-    write_csv(REPORT_ROOT / "class_distribution.csv", class_rows, ["class_id", "class_name", "split", "images", "instances"])
+    write_csv(args.reports_root / "class_distribution.csv", class_rows, ["class_id", "class_name", "split", "images", "instances"])
 
     manifest_rows = [{
         "image_id": record.output_id,
@@ -514,11 +542,11 @@ def main() -> None:
         "sha256": record.sha256,
         "phash": record.phash,
     } for record in all_records]
-    write_csv(REPORT_ROOT / "dataset_manifest.csv", manifest_rows, list(manifest_rows[0]))
+    write_csv(args.reports_root / "dataset_manifest.csv", manifest_rows, list(manifest_rows[0]))
 
     near_pairs = near_duplicate_pairs(all_records)
-    write_csv(REPORT_ROOT / "near_duplicate_candidates.csv", near_pairs, ["left", "right", "distance", "same_patient_group"])
-    write_json(REPORT_ROOT / "exact_duplicates_removed.json", exact_duplicates)
+    write_csv(args.reports_root / "near_duplicate_candidates.csv", near_pairs, ["left", "right", "distance", "same_patient_group"])
+    write_json(args.reports_root / "exact_duplicates_removed.json", exact_duplicates)
 
     issue_counts = Counter(issue.split(":", 1)[0] for record in all_records for issue in record.issues)
     split_counts = Counter(record.split for record in all_records)
@@ -548,7 +576,7 @@ def main() -> None:
         "raw_filename_privacy": "Raw disease filenames may contain names. Processed filenames and manifests use opaque IDs only.",
         "manual_audit_status": "Class-stratified visual sheets generated for human/clinical review; automated checks are complete.",
     }
-    write_json(REPORT_ROOT / "dataset_audit.json", audit)
+    write_json(args.reports_root / "dataset_audit.json", audit)
     print(json.dumps(audit, indent=2))
 
 

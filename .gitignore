@@ -7,6 +7,7 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.ipynb_checkpoints/
 
 # Editors and OS metadata
 .vscode/
@@ -26,7 +27,8 @@ dataset/runtime/
 dataset/*.cache
 
 # Downloaded base checkpoint; selected checkpoints are retained in artifacts/
-yolo26n.pt
+yolo26*.pt
+colab-results/
 
 # Regenerable logs
 reports/training_console.log

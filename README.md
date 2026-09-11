@@ -1,5 +1,7 @@
 # Dental YOLO26 Detection
 
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/sina-04/dental-yolo26-detection/blob/main/notebooks/dental_yolo26_colab.ipynb)
+
 An end-to-end, reproducible dental object-detection project built with Ultralytics YOLO26. It combines an intraoral tooth-anatomy dataset with a panoramic dental-disease dataset, converts incompatible annotations into one 38-class detection ontology, prevents group leakage, trains two experiments, selects the final checkpoint using validation results, and evaluates it once on a held-out test set.
 
 > [!WARNING]
@@ -22,6 +24,7 @@ The paragraph above is exactly 250 characters and is used as the GitHub reposito
 - Compares a baseline against a medically augmented YOLO26n experiment.
 - Selects the model using validation mAP50-95, without using test performance for selection.
 - Includes final weights, metrics, plots, threshold analysis, and 10 held-out inference examples.
+- Includes a resumable Google Colab workflow that downloads exact Kaggle versions, uses the full training split, and persists every epoch checkpoint to Google Drive.
 
 ## Datasets
 
@@ -80,6 +83,8 @@ The following are disabled: Mosaic, MixUp, CutMix, Copy-Paste, hue/saturation sh
 
 ## Model and executed experiments
 
+The metrics below document the already executed 2 GB local baseline. They are retained for provenance and should not be confused with the stronger Colab profile described in the next section. Colab results are written to Drive and can replace these published metrics only after that run finishes and is reviewed.
+
 - Framework: [Ultralytics YOLO26](https://docs.ultralytics.com/models/yolo26/)
 - Model: YOLO26n
 - Pretrained checkpoint: `yolo26n.pt`
@@ -96,6 +101,40 @@ The following are disabled: Mosaic, MixUp, CutMix, Copy-Paste, hue/saturation sh
 | `tuned_yolo26n_medical_aug` | 2 | Medical augmentation | 0.8590 | 0.0197 | 0.0392 | 0.0260 |
 
 The medically augmented experiment was selected only by validation mAP50-95.
+
+## Recommended: full-data Google Colab training
+
+Open [`notebooks/dental_yolo26_colab.ipynb`](notebooks/dental_yolo26_colab.ipynb) with the badge at the top of this README and choose a GPU runtime. The notebook mounts Google Drive, clones this repository, installs Colab-safe dependencies without replacing Colab's PyTorch/CUDA build, downloads the exact public Kaggle dataset versions to the runtime SSD, rebuilds and verifies the combined dataset, and starts resumable training.
+
+The default Colab profile is deliberately stronger than the historical local run:
+
+| Setting | Local baseline | Colab full-data profile |
+|---|---:|---:|
+| Model | YOLO26n | YOLO26s |
+| Image size | 320 | 640 |
+| Training images | 1,200 class-covered subset | Complete prepared training split |
+| Baseline epochs | 1 | 15 |
+| Tuned epochs | 2 | 40 |
+| Batch size | 8 | 16 |
+| Checkpoint persistence | Local disk | Google Drive after every epoch |
+
+The Colab command used by the notebook is:
+
+```bash
+python -m src.colab_workflow \
+  --stage train \
+  --results-root /content/drive/MyDrive/dental-yolo26-detection/colab-results \
+  --model yolo26s.pt \
+  --baseline-epochs 15 \
+  --tuned-epochs 40 \
+  --imgsz 640 \
+  --batch 16 \
+  --workers 4 \
+  --patience 12 \
+  --seed 42
+```
+
+Rerun the training cell after a Colab interruption; incomplete experiments resume from their Drive-backed `last.pt`. If the assigned GPU runs out of memory, change only `--batch 16` to `--batch 8`. Raw datasets remain on Colab's temporary SSD rather than being copied into Git or Drive. Final weights, metrics, plots, environment details, and reports are stored under `MyDrive/dental-yolo26-detection/colab-results/`.
 
 ## Held-out test results
 
@@ -136,6 +175,7 @@ The high precision must not be interpreted by itself. At the selected threshold,
 │   └── threshold_analysis.png
 ├── runs/                         # privacy-safe Ultralytics plots and results
 ├── src/
+│   ├── colab_workflow.py
 │   ├── common.py
 │   ├── prepare_dataset.py
 │   ├── verify_dataset.py
@@ -143,11 +183,14 @@ The high precision must not be interpreted by itself. At the selected threshold,
 │   └── generate_report.py
 ├── tests/
 │   └── test_pipeline.py
+├── notebooks/
+│   └── dental_yolo26_colab.ipynb
 ├── tools/
 │   └── segmented_download.py
 ├── FINAL_REPORT.md
 ├── PROGRESS.md
 ├── requirements.txt
+├── requirements-colab.txt
 └── README.md
 ```
 
@@ -159,6 +202,8 @@ The high precision must not be interpreted by itself. At the selected threshold,
 - Sufficient disk space for both Kaggle datasets and the generated dataset
 
 The pinned requirements use PyTorch CUDA 11.8. If your GPU requires a different CUDA build, install the appropriate PyTorch build from the [official PyTorch selector](https://pytorch.org/get-started/locally/) before installing the remaining dependencies.
+
+On Colab, use `requirements-colab.txt`. It intentionally does not pin PyTorch or CUDA, preserving the accelerator-compatible build supplied by Colab.
 
 ## Installation
 
@@ -220,7 +265,7 @@ If a generated `dataset/` already exists and you deliberately want to replace it
 
 A valid build returns `"status": "pass"` and zero cross-split leakage failures.
 
-## Reproduce the executed low-memory training run
+## Reproduce the historical low-memory training run
 
 ```powershell
 .\.venv\Scripts\python.exe -m src.train_evaluate `
@@ -237,12 +282,13 @@ A valid build returns `"status": "pass"` and zero cross-split leakage failures.
 
 The complete validation and test sets remain in use when `--max-train-images` limits the training set.
 
-## Run a longer full-data experiment
+## Run a longer full-data experiment outside Colab
 
 Use appropriate hardware and adjust the following example to your GPU capacity:
 
 ```powershell
 .\.venv\Scripts\python.exe -m src.train_evaluate `
+  --model yolo26s.pt `
   --baseline-epochs 20 `
   --tuned-epochs 30 `
   --imgsz 512 `

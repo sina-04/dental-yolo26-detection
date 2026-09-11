@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import csv
 import json
 from pathlib import Path
@@ -23,15 +24,24 @@ def percentage(value: float) -> str:
 
 
 def main() -> None:
-    audit = read_json(REPORTS / "dataset_audit.json")
-    final = read_json(REPORTS / "final_metrics.json")
-    experiments = read_csv(REPORTS / "experiments.csv")
-    class_rows = [row for row in read_csv(REPORTS / "class_distribution.csv") if row["split"] == "all"]
-    per_class = read_csv(REPORTS / "per_class_test_metrics.csv")
-    errors = read_csv(REPORTS / "error_analysis.csv")
+    parser = argparse.ArgumentParser(description="Generate human-readable reports from a completed training run.")
+    parser.add_argument("--results-root", type=Path, default=ROOT)
+    parser.add_argument("--dataset-reports-root", type=Path, default=REPORTS)
+    args = parser.parse_args()
+    results_root = args.results_root.resolve()
+    reports = results_root / "reports"
+    audit_reports = args.dataset_reports_root.resolve()
+    audit = read_json(audit_reports / "dataset_audit.json")
+    final = read_json(reports / "final_metrics.json")
+    experiments = read_csv(reports / "experiments.csv")
+    class_rows = [row for row in read_csv(audit_reports / "class_distribution.csv") if row["split"] == "all"]
+    per_class = read_csv(reports / "per_class_test_metrics.csv")
+    errors = read_csv(reports / "error_analysis.csv")
     environment = final["environment"]
     executed_train_images = final["experiments"][0].get("train_images", audit["split_counts"].get("train", 0))
     available_train_images = audit["split_counts"].get("train", 0) + audit.get("augmented_training_images", 0)
+    model_checkpoint = str(final["experiments"][0].get("model", "YOLO26"))
+    compute_profile = "full-data" if executed_train_images >= available_train_images else "compute-limited"
     test = final["test_ultralytics_metrics"]
     custom = final["test_threshold_metrics_iou50"]
 
@@ -65,7 +75,7 @@ This project uses both requested Kaggle datasets to build a single YOLO26 object
 
 The selected model is **{final['selected_experiment']}**, chosen only by validation mAP50-95. Its held-out test mAP50-95 is **{test.get('metrics/mAP50-95(B)', 0.0):.4f}**, mAP50 is **{test.get('metrics/mAP50(B)', 0.0):.4f}**, precision is **{test.get('metrics/precision(B)', 0.0):.4f}**, and recall is **{test.get('metrics/recall(B)', 0.0):.4f}**. At the validation-selected confidence threshold of **{final['validation_selected_threshold']:.2f}**, the custom IoU=0.50 test F1 is **{custom['f1']:.4f}**.
 
-The executed local training profile used **{executed_train_images:,} of {available_train_images:,} available training images** with deterministic rare-class coverage because the available MX330 has only 2 GB VRAM. Validation and test sets remained complete. This result is a compute-constrained baseline, not the final accuracy ceiling of the full dataset.
+The executed **{compute_profile}** profile used **{executed_train_images:,} of {available_train_images:,} available training images**. Validation and test sets remained complete. Hardware and software details are recorded below so local and Colab runs can be compared without conflating their compute budgets.
 
 The result is **not clinically usable**: at the validation-selected 0.05 threshold it missed **{custom['fn']:,} of {custom['tp'] + custom['fn']:,}** labeled test objects (recall {custom['recall']:.4f}). The high aggregate precision must not be read in isolation; the model is severely recall-limited after this short local training profile.
 
@@ -106,7 +116,7 @@ Because patient identifiers were inferred from filenames rather than verified ag
 ## Model and training configuration
 
 - Ultralytics: **{environment['ultralytics']}**
-- Model/checkpoint: **YOLO26n / `yolo26n.pt`**, COCO-pretrained transfer learning
+- Model/checkpoint: **`{model_checkpoint}`**, COCO-pretrained transfer learning
 - Python: **{environment['python']}**
 - PyTorch: **{environment['torch']}**
 - Device: **{environment['selected_device']}** ({environment.get('gpu') or 'CPU'})
@@ -115,7 +125,7 @@ Because patient identifiers were inferred from filenames rather than verified ag
 - Early stopping, weight decay 0.0005, deterministic seed 42: **enabled**
 - Offline AlbumentationsX: rotation ±7°, mild brightness/contrast, low-probability 3×3 Gaussian blur or CLAHE; bounding boxes transformed together with images
 
-YOLO26n was selected instead of YOLO26s because the available MX330 has only 2 GB VRAM. This compute-driven choice is documented rather than presented as an accuracy-optimal model-size comparison.
+The checkpoint and image size were selected explicitly for the recorded hardware profile. The public repository preserves the earlier 2 GB local run as a baseline, while the Colab workflow defaults to a larger YOLO26s model and full-resolution training.
 
 ## Validation experiment comparison
 
@@ -187,14 +197,15 @@ False negatives could miss disease; false positives could trigger unnecessary co
 - `artifacts/best.pt` and `artifacts/last.pt`: selected YOLO26 checkpoints
 - `artifacts/training_configuration.json` and `environment_freeze.txt`: exact run details
 """
-    (ROOT / "FINAL_REPORT.md").write_text(report, encoding="utf-8")
+    results_root.mkdir(parents=True, exist_ok=True)
+    (results_root / "FINAL_REPORT.md").write_text(report, encoding="utf-8")
 
     progress = """# Deliverable Progress
 
 | Deliverable | Progress | Completed | Problems encountered | Knowledge / evidence gained | Next action |
 |---|---:|---|---|---|---|
 | Training source code | 100% | End-to-end preparation, training, validation, testing, inference, and error-analysis CLIs | Local compute constrained model scale and epoch budget | Reproducible YOLO26 workflow | Re-run on a larger GPU for longer experiments |
-| Final model weights | 100% | Selected `best.pt` and retained `last.pt` | YOLO26s was infeasible on 2 GB VRAM | Nano is the viable local baseline | Benchmark s/m on cloud GPU without opening test set |
+| Final model weights | 100% | Selected `best.pt` and retained `last.pt` | Model capacity depends on the assigned accelerator | Validation-only selection preserves test isolation | Compare larger models only on validation data |
 | Dataset and configuration | 100% | Both sources combined, polygons boxified, group split, data.yaml generated | Source ontologies differ; inferred IDs only | Namespacing avoids false semantic merges | Clinician review and verified patient index |
 | Evaluation report | 100% | Full test metrics, per-class table, losses, confusion matrix, PR and threshold analysis | Rare classes yield unstable estimates | Per-class reporting exposes imbalance | Add confidence intervals with larger external test data |
 | Ten unseen examples | 100% | Representative held-out test visualizations | Some error types may not occur in a small test set | Model behavior is inspectable | Blinded expert review |
@@ -211,7 +222,7 @@ False negatives could miss disease; false positives could trigger unnecessary co
 - Which false-negative classes are clinically highest priority?
 - Is external-site data available for a genuine generalization test?
 """
-    (ROOT / "PROGRESS.md").write_text(progress, encoding="utf-8")
+    (results_root / "PROGRESS.md").write_text(progress, encoding="utf-8")
 
 
 if __name__ == "__main__":
