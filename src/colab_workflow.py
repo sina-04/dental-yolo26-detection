@@ -19,9 +19,8 @@ def run(command: list[str]) -> None:
 
 
 def download_dataset(handle: str, destination: Path) -> Path:
-    import kagglehub
-
-    if (destination / ".complete").exists():
+    marker = destination / ".codex_complete"
+    if marker.is_file():
         print(f"Reusing completed Kaggle download: {destination}", flush=True)
         return destination
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -29,12 +28,14 @@ def download_dataset(handle: str, destination: Path) -> Path:
         has_manifest = any(destination.rglob("data.yaml"))
         has_image = any(path.suffix.lower() in {".jpg", ".jpeg", ".png"} for path in destination.rglob("*"))
         if has_manifest and has_image:
-            (destination / ".complete").write_text(handle + "\n", encoding="utf-8")
+            marker.write_text(handle + "\n", encoding="utf-8")
             print(f"Reusing extracted Kaggle download: {destination}", flush=True)
             return destination
         raise FileExistsError(f"Incomplete dataset directory exists: {destination}")
+    import kagglehub
+
     resolved = Path(kagglehub.dataset_download(handle, output_dir=str(destination)))
-    (destination / ".complete").write_text(handle + "\n", encoding="utf-8")
+    marker.write_text(handle + "\n", encoding="utf-8")
     print(f"Downloaded {handle} to {resolved}", flush=True)
     return resolved
 

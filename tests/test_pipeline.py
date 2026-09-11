@@ -4,7 +4,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from src.colab_workflow import build_parser, prepared_dataset_is_valid
+from src.colab_workflow import build_parser, download_dataset, prepared_dataset_is_valid
 from src.prepare_dataset import (
     Box,
     Record,
@@ -99,6 +99,19 @@ class PipelineTests(unittest.TestCase):
             (dataset / ".colab_prepared.json").write_text("{}", encoding="utf-8")
             self.assertTrue(prepared_dataset_is_valid(dataset, reports))
             self.assertFalse(prepared_dataset_is_valid(dataset, reports, {"minority_target_instances": 128}))
+
+    def test_colab_download_marker_does_not_conflict_with_kagglehub_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "download"
+            (destination / ".complete").mkdir(parents=True)
+            destination.joinpath("data.yaml").write_text("names: []\n", encoding="utf-8")
+            destination.joinpath("image.jpg").write_bytes(b"image")
+
+            resolved = download_dataset("owner/dataset/versions/1", destination)
+
+            self.assertEqual(destination, resolved)
+            self.assertTrue((destination / ".complete").is_dir())
+            self.assertEqual("owner/dataset/versions/1\n", (destination / ".codex_complete").read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":
