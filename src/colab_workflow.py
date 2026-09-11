@@ -187,7 +187,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--baseline-epochs", type=int, default=15)
     parser.add_argument("--tuned-epochs", type=int, default=40)
     parser.add_argument("--imgsz", type=int, default=640)
-    parser.add_argument("--batch", type=int, default=16)
+    parser.add_argument("--batch", type=int, default=32)
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--patience", type=int, default=12)
     parser.add_argument("--cache", choices=("false", "disk", "ram"), default="false")

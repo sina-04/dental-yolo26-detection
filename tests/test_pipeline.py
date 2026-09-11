@@ -55,6 +55,7 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual("yolo26s.pt", args.model)
         self.assertIsNone(getattr(args, "max_train_images", None))
         self.assertEqual(640, args.imgsz)
+        self.assertEqual(32, args.batch)
 
     def test_augmentation_policy_builds_with_installed_backend(self) -> None:
         self.assertIsNotNone(build_augmentation(seed=42))

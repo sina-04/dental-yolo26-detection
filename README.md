@@ -115,7 +115,7 @@ The default Colab profile is deliberately stronger than the historical local run
 | Training images | 1,200 class-covered subset | Complete prepared training split |
 | Baseline epochs | 1 | 15 |
 | Tuned epochs | 2 | 40 |
-| Batch size | 8 | 16 |
+| Batch size | 8 | 32 |
 | Checkpoint persistence | Local disk | Google Drive after every epoch |
 
 The Colab command used by the notebook is:
@@ -128,13 +128,13 @@ python -m src.colab_workflow \
   --baseline-epochs 15 \
   --tuned-epochs 40 \
   --imgsz 640 \
-  --batch 16 \
+  --batch 32 \
   --workers 4 \
   --patience 12 \
   --seed 42
 ```
 
-Rerun the training cell after a Colab interruption; incomplete experiments resume from their Drive-backed `last.pt`. If the assigned GPU runs out of memory, change only `--batch 16` to `--batch 8`. Raw datasets remain on Colab's temporary SSD rather than being copied into Git or Drive. Final weights, metrics, plots, environment details, and reports are stored under `MyDrive/dental-yolo26-detection/colab-results/`.
+Rerun the training cell after a Colab interruption; incomplete experiments resume from their Drive-backed `last.pt`. Batch size 32 has been validated on a 14.6 GiB Tesla T4. If the assigned GPU runs out of memory, reduce `--batch 32` to `--batch 16` (or 8 on a smaller accelerator). Raw datasets remain on Colab's temporary SSD rather than being copied into Git or Drive. Final weights, metrics, plots, environment details, and reports are stored under `MyDrive/dental-yolo26-detection/colab-results/`.
 
 ## Held-out test results
 
