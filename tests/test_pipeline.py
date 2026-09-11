@@ -4,7 +4,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from src.colab_workflow import build_parser
+from src.colab_workflow import build_parser, prepared_dataset_is_valid
 from src.prepare_dataset import build_augmentation, parse_label, patient_key, resolve_dataset_root
 
 
@@ -58,6 +58,18 @@ class PipelineTests(unittest.TestCase):
 
     def test_augmentation_policy_builds_with_installed_backend(self) -> None:
         self.assertIsNotNone(build_augmentation(seed=42))
+
+    def test_colab_prepared_dataset_requires_session_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            dataset = root / "dataset"
+            reports = root / "reports"
+            (dataset / "images" / "train").mkdir(parents=True)
+            reports.mkdir()
+            (reports / "dataset_verification.json").write_text('{"status":"pass"}', encoding="utf-8")
+            self.assertFalse(prepared_dataset_is_valid(dataset, reports))
+            (dataset / ".colab_prepared.json").write_text("{}", encoding="utf-8")
+            self.assertTrue(prepared_dataset_is_valid(dataset, reports))
 
 
 if __name__ == "__main__":

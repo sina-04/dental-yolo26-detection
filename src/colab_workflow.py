@@ -26,17 +26,23 @@ def download_dataset(handle: str, destination: Path) -> Path:
         return destination
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.exists() and any(destination.iterdir()):
-        raise FileExistsError(
-            f"Incomplete dataset directory exists: {destination}. Remove it or pass a different --data-root."
-        )
+        has_manifest = any(destination.rglob("data.yaml"))
+        has_image = any(path.suffix.lower() in {".jpg", ".jpeg", ".png"} for path in destination.rglob("*"))
+        if has_manifest and has_image:
+            (destination / ".complete").write_text(handle + "\n", encoding="utf-8")
+            print(f"Reusing extracted Kaggle download: {destination}", flush=True)
+            return destination
+        raise FileExistsError(f"Incomplete dataset directory exists: {destination}")
     resolved = Path(kagglehub.dataset_download(handle, output_dir=str(destination)))
+    (destination / ".complete").write_text(handle + "\n", encoding="utf-8")
     print(f"Downloaded {handle} to {resolved}", flush=True)
     return resolved
 
 
 def prepared_dataset_is_valid(dataset: Path, reports: Path) -> bool:
     verification = reports / "dataset_verification.json"
-    if not verification.exists() or not (dataset / "images" / "train").exists():
+    marker = dataset / ".colab_prepared.json"
+    if not marker.exists() or not verification.exists() or not (dataset / "images" / "train").exists():
         return False
     try:
         return json.loads(verification.read_text(encoding="utf-8")).get("status") == "pass"
@@ -82,6 +88,10 @@ def prepare(data_root: Path, augment_fraction: float, seed: int, rebuild: bool) 
             "--reports-root",
             str(reports),
         ]
+    )
+    (dataset / ".colab_prepared.json").write_text(
+        json.dumps({"augment_fraction": augment_fraction, "seed": seed}, indent=2) + "\n",
+        encoding="utf-8",
     )
     return dataset, reports
 
