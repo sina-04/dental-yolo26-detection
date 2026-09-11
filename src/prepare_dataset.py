@@ -7,6 +7,7 @@ import concurrent.futures
 from dataclasses import dataclass, field
 import json
 import inspect
+import math
 from pathlib import Path
 import random
 import re
@@ -422,15 +423,61 @@ def build_augmentation(seed: int) -> A.Compose:
     return A.Compose([rotate, brightness, A.OneOf([blur, clahe], p=0.25)], bbox_params=bbox_params, seed=seed)
 
 
-def augment_training(records: list[Record], output_root: Path, fraction: float, seed: int) -> int:
-    if fraction <= 0:
+def augmentation_copy_plan(
+    records: list[Record],
+    fraction: float,
+    minority_target_instances: int,
+    max_augmentations_per_image: int,
+    seed: int,
+) -> dict[str, int]:
+    """Plan deterministic train-only augmentation with extra emphasis on rare classes.
+
+    The cap prevents a single patient image from dominating training even when a
+    class has only one example. Augmentation improves invariance, but it does not
+    pretend that transformed copies are independent clinical observations.
+    """
+    candidates = [record for record in records if record.split == "train" and record.boxes]
+    shuffled = list(candidates)
+    random.Random(seed).shuffle(shuffled)
+    copies = {record.output_id: 0 for record in candidates}
+    uniform_count = max(0, round(len(shuffled) * max(0.0, fraction)))
+    for record in shuffled[:uniform_count]:
+        copies[record.output_id] = 1
+
+    if minority_target_instances <= 0 or max_augmentations_per_image <= 0:
+        return copies
+    class_counts = Counter(box.class_id for record in candidates for box in record.boxes)
+    for record in candidates:
+        required = 0
+        for class_id in {box.class_id for box in record.boxes}:
+            count = class_counts[class_id]
+            if count < minority_target_instances:
+                required = max(required, math.ceil(minority_target_instances / max(1, count)) - 1)
+        copies[record.output_id] = max(copies[record.output_id], min(max_augmentations_per_image, required))
+    return copies
+
+
+def augment_training(
+    records: list[Record],
+    output_root: Path,
+    fraction: float,
+    minority_target_instances: int,
+    max_augmentations_per_image: int,
+    seed: int,
+) -> int:
+    if fraction <= 0 and minority_target_instances <= 0:
         return 0
     transform = build_augmentation(seed)
     candidates = [record for record in records if record.split == "train" and record.boxes]
-    random.Random(seed).shuffle(candidates)
-    count = max(0, round(len(candidates) * fraction))
+    copy_plan = augmentation_copy_plan(
+        records,
+        fraction,
+        minority_target_instances,
+        max_augmentations_per_image,
+        seed,
+    )
     created = 0
-    for record in candidates[:count]:
+    for record in candidates:
         source = next((path for path in (output_root / "images" / "train").glob(f"{record.output_id}.*")), None)
         if source is None:
             continue
@@ -439,15 +486,16 @@ def augment_training(records: list[Record], output_root: Path, fraction: float, 
             continue
         bboxes = [(box.x, box.y, box.w, box.h) for box in record.boxes]
         classes = [box.class_id for box in record.boxes]
-        augmented = transform(image=image, bboxes=bboxes, class_labels=classes)
-        if len(augmented["bboxes"]) == 0:
-            continue
-        output_id = f"{record.output_id}_aug1"
-        image_path = output_root / "images" / "train" / f"{output_id}.jpg"
-        cv2.imwrite(str(image_path), augmented["image"], [cv2.IMWRITE_JPEG_QUALITY, 95])
-        boxes = [Box(int(class_id), *map(float, bbox)) for bbox, class_id in zip(augmented["bboxes"], augmented["class_labels"], strict=True)]
-        save_box_labels(output_root / "labels" / "train" / f"{output_id}.txt", boxes)
-        created += 1
+        for copy_index in range(1, copy_plan.get(record.output_id, 0) + 1):
+            augmented = transform(image=image, bboxes=bboxes, class_labels=classes)
+            if len(augmented["bboxes"]) == 0:
+                continue
+            output_id = f"{record.output_id}_aug{copy_index}"
+            image_path = output_root / "images" / "train" / f"{output_id}.jpg"
+            cv2.imwrite(str(image_path), augmented["image"], [cv2.IMWRITE_JPEG_QUALITY, 95])
+            boxes = [Box(int(class_id), *map(float, bbox)) for bbox, class_id in zip(augmented["bboxes"], augmented["class_labels"], strict=True)]
+            save_box_labels(output_root / "labels" / "train" / f"{output_id}.txt", boxes)
+            created += 1
     return created
 
 
@@ -482,6 +530,8 @@ def main() -> None:
     parser.add_argument("--anatomy-root", type=Path, help="Extracted anatomy dataset or a parent directory containing it.")
     parser.add_argument("--disease-root", type=Path, help="Extracted disease dataset or a parent directory containing it.")
     parser.add_argument("--augment-fraction", type=float, default=0.15)
+    parser.add_argument("--minority-target-instances", type=int, default=128)
+    parser.add_argument("--max-augmentations-per-image", type=int, default=8)
     parser.add_argument("--seed", type=int, default=SEED)
     parser.add_argument("--resume", action="store_true", help="Reuse/overwrite a previously generated output without deleting it.")
     parser.add_argument("--rebuild", action="store_true", help="Delete and regenerate only the project dataset output.")
@@ -515,7 +565,14 @@ def main() -> None:
     anatomy_near_group_merges = merge_anatomy_near_duplicate_groups(all_records)
     assign_splits(all_records, len(names))
     materialize(all_records, args.output)
-    augmented_count = augment_training(all_records, args.output, args.augment_fraction, args.seed)
+    augmented_count = augment_training(
+        all_records,
+        args.output,
+        args.augment_fraction,
+        args.minority_target_instances,
+        args.max_augmentations_per_image,
+        args.seed,
+    )
 
     data_yaml = {
         "train": "images/train",
@@ -584,6 +641,8 @@ def main() -> None:
         "anatomy_records_regrouped_by_phash_distance_le_2": anatomy_near_group_merges,
         "polygon_annotations_converted": anatomy_polygons + disease_polygons,
         "augmented_training_images": augmented_count,
+        "minority_target_instances": args.minority_target_instances,
+        "max_augmentations_per_image": args.max_augmentations_per_image,
         "issue_counts": dict(issue_counts),
         "images_after_exact_deduplication": len(all_records),
         "instances": sum(len(record.boxes) for record in all_records),

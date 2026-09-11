@@ -39,21 +39,37 @@ def download_dataset(handle: str, destination: Path) -> Path:
     return resolved
 
 
-def prepared_dataset_is_valid(dataset: Path, reports: Path) -> bool:
+def prepared_dataset_is_valid(dataset: Path, reports: Path, expected_marker: dict[str, object] | None = None) -> bool:
     verification = reports / "dataset_verification.json"
     marker = dataset / ".colab_prepared.json"
     if not marker.exists() or not verification.exists() or not (dataset / "images" / "train").exists():
         return False
     try:
-        return json.loads(verification.read_text(encoding="utf-8")).get("status") == "pass"
+        marker_data = json.loads(marker.read_text(encoding="utf-8"))
+        verification_passed = json.loads(verification.read_text(encoding="utf-8")).get("status") == "pass"
+        marker_matches = expected_marker is None or all(marker_data.get(key) == value for key, value in expected_marker.items())
+        return verification_passed and marker_matches
     except (json.JSONDecodeError, OSError):
         return False
 
 
-def prepare(data_root: Path, augment_fraction: float, seed: int, rebuild: bool) -> tuple[Path, Path]:
+def prepare(
+    data_root: Path,
+    augment_fraction: float,
+    minority_target_instances: int,
+    max_augmentations_per_image: int,
+    seed: int,
+    rebuild: bool,
+) -> tuple[Path, Path]:
     dataset = PROJECT_ROOT / "dataset"
     reports = PROJECT_ROOT / "reports"
-    if prepared_dataset_is_valid(dataset, reports) and not rebuild:
+    marker_payload = {
+        "augment_fraction": augment_fraction,
+        "minority_target_instances": minority_target_instances,
+        "max_augmentations_per_image": max_augmentations_per_image,
+        "seed": seed,
+    }
+    if prepared_dataset_is_valid(dataset, reports, marker_payload) and not rebuild:
         print("Prepared dataset already passed verification; skipping rebuild.", flush=True)
         return dataset, reports
 
@@ -73,6 +89,10 @@ def prepare(data_root: Path, augment_fraction: float, seed: int, rebuild: bool) 
         str(reports),
         "--augment-fraction",
         str(augment_fraction),
+        "--minority-target-instances",
+        str(minority_target_instances),
+        "--max-augmentations-per-image",
+        str(max_augmentations_per_image),
         "--seed",
         str(seed),
     ]
@@ -90,7 +110,7 @@ def prepare(data_root: Path, augment_fraction: float, seed: int, rebuild: bool) 
         ]
     )
     (dataset / ".colab_prepared.json").write_text(
-        json.dumps({"augment_fraction": augment_fraction, "seed": seed}, indent=2) + "\n",
+        json.dumps(marker_payload, indent=2) + "\n",
         encoding="utf-8",
     )
     return dataset, reports
@@ -185,13 +205,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--model", default="yolo26s.pt")
     parser.add_argument("--baseline-epochs", type=int, default=15)
-    parser.add_argument("--tuned-epochs", type=int, default=40)
+    parser.add_argument("--tuned-epochs", type=int, default=100)
     parser.add_argument("--imgsz", type=int, default=640)
     parser.add_argument("--batch", type=int, default=32)
     parser.add_argument("--workers", type=int, default=4)
-    parser.add_argument("--patience", type=int, default=12)
+    parser.add_argument("--patience", type=int, default=20)
     parser.add_argument("--cache", choices=("false", "disk", "ram"), default="false")
     parser.add_argument("--augment-fraction", type=float, default=0.15)
+    parser.add_argument("--minority-target-instances", type=int, default=128)
+    parser.add_argument("--max-augmentations-per-image", type=int, default=8)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--run-prefix", default="colab_full")
     parser.add_argument("--rebuild-data", action="store_true")
@@ -205,7 +227,14 @@ def main() -> None:
     dataset = PROJECT_ROOT / "dataset"
     dataset_reports = PROJECT_ROOT / "reports"
     if args.stage in {"prepare", "all"}:
-        dataset, dataset_reports = prepare(args.data_root, args.augment_fraction, args.seed, args.rebuild_data)
+        dataset, dataset_reports = prepare(
+            args.data_root,
+            args.augment_fraction,
+            args.minority_target_instances,
+            args.max_augmentations_per_image,
+            args.seed,
+            args.rebuild_data,
+        )
     if args.stage in {"train", "all"}:
         if not prepared_dataset_is_valid(dataset, dataset_reports):
             raise RuntimeError("The dataset is not prepared and verified. Run with --stage prepare or --stage all.")

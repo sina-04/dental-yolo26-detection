@@ -114,7 +114,7 @@ The default Colab profile is deliberately stronger than the historical local run
 | Image size | 320 | 640 |
 | Training images | 1,200 class-covered subset | Complete prepared training split |
 | Baseline epochs | 1 | 15 |
-| Tuned epochs | 2 | 40 |
+| Tuned epochs | 2 | Up to 100 (early stopping) |
 | Batch size | 8 | 32 |
 | Checkpoint persistence | Local disk | Google Drive after every epoch |
 
@@ -126,13 +126,16 @@ python -m src.colab_workflow \
   --results-root /content/drive/MyDrive/dental-yolo26-detection/colab-results \
   --model yolo26s.pt \
   --baseline-epochs 15 \
-  --tuned-epochs 40 \
+  --tuned-epochs 100 \
   --imgsz 640 \
   --batch 32 \
   --workers 4 \
-  --patience 12 \
+  --patience 20 \
+  --run-prefix colab_accuracy_v1 \
   --seed 42
 ```
+
+The accuracy profile combines capped minority-class augmentation (target 128 instances, no more than eight synthetic variants from one image), cosine-decay AdamW optimization, mild multi-scale training, and validation-based early stopping. These changes reduce imbalance without allowing a single rare patient image to dominate the dataset. They cannot substitute for collecting independent examples of classes that currently have only a handful of observations.
 
 Rerun the training cell after a Colab interruption; incomplete experiments resume from their Drive-backed `last.pt`. Batch size 32 has been validated on a 14.6 GiB Tesla T4. If the assigned GPU runs out of memory, reduce `--batch 32` to `--batch 16` (or 8 on a smaller accelerator). Raw datasets remain on Colab's temporary SSD rather than being copied into Git or Drive. Final weights, metrics, plots, environment details, and reports are stored under `MyDrive/dental-yolo26-detection/colab-results/`.
 

@@ -5,7 +5,15 @@ import tempfile
 import unittest
 
 from src.colab_workflow import build_parser, prepared_dataset_is_valid
-from src.prepare_dataset import build_augmentation, parse_label, patient_key, resolve_dataset_root
+from src.prepare_dataset import (
+    Box,
+    Record,
+    augmentation_copy_plan,
+    build_augmentation,
+    parse_label,
+    patient_key,
+    resolve_dataset_root,
+)
 
 
 class PipelineTests(unittest.TestCase):
@@ -56,6 +64,25 @@ class PipelineTests(unittest.TestCase):
         self.assertIsNone(getattr(args, "max_train_images", None))
         self.assertEqual(640, args.imgsz)
         self.assertEqual(32, args.batch)
+        self.assertEqual(100, args.tuned_epochs)
+        self.assertEqual(20, args.patience)
+        self.assertEqual(128, args.minority_target_instances)
+
+    def test_class_aware_augmentation_caps_rare_patient_reuse(self) -> None:
+        rare = Record("disease", "train", Path("rare.jpg"), None, "p1", [Box(0, 0.5, 0.5, 0.1, 0.1)], output_id="rare", split="train")
+        common = Record(
+            "disease",
+            "train",
+            Path("common.jpg"),
+            None,
+            "p2",
+            [Box(1, 0.5, 0.5, 0.1, 0.1) for _ in range(20)],
+            output_id="common",
+            split="train",
+        )
+        plan = augmentation_copy_plan([rare, common], 0.0, minority_target_instances=8, max_augmentations_per_image=3, seed=42)
+        self.assertEqual(3, plan["rare"])
+        self.assertEqual(0, plan["common"])
 
     def test_augmentation_policy_builds_with_installed_backend(self) -> None:
         self.assertIsNotNone(build_augmentation(seed=42))
@@ -71,6 +98,7 @@ class PipelineTests(unittest.TestCase):
             self.assertFalse(prepared_dataset_is_valid(dataset, reports))
             (dataset / ".colab_prepared.json").write_text("{}", encoding="utf-8")
             self.assertTrue(prepared_dataset_is_valid(dataset, reports))
+            self.assertFalse(prepared_dataset_is_valid(dataset, reports, {"minority_target_instances": 128}))
 
 
 if __name__ == "__main__":
