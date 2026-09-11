@@ -6,6 +6,7 @@ from collections import Counter, defaultdict
 import concurrent.futures
 from dataclasses import dataclass, field
 import json
+import inspect
 from pathlib import Path
 import random
 import re
@@ -400,18 +401,31 @@ def materialize(records: list[Record], output_root: Path) -> None:
         save_box_labels(output_root / "labels" / record.split / f"{record.output_id}.txt", record.boxes)
 
 
+def build_augmentation(seed: int) -> A.Compose:
+    """Create the same conservative policy for Albumentations and AlbumentationsX."""
+    if "angle_range" in inspect.signature(A.Rotate).parameters:
+        rotate = A.Rotate(angle_range=(-7, 7), border_mode=cv2.BORDER_CONSTANT, p=0.70)
+        brightness = A.RandomBrightnessContrast(
+            brightness_range=(-0.10, 0.10), contrast_range=(-0.10, 0.10), p=0.65
+        )
+        blur = A.GaussianBlur(blur_range=(3, 3), p=1.0)
+        clahe = A.CLAHE(clip_range=(1.0, 2.0), p=1.0)
+        bbox_params = A.BboxParams(coord_format="yolo", label_fields=["class_labels"], min_visibility=0.70)
+    else:
+        rotate = A.Rotate(limit=(-7, 7), border_mode=cv2.BORDER_CONSTANT, p=0.70)
+        brightness = A.RandomBrightnessContrast(
+            brightness_limit=(-0.10, 0.10), contrast_limit=(-0.10, 0.10), p=0.65
+        )
+        blur = A.GaussianBlur(blur_limit=(3, 3), p=1.0)
+        clahe = A.CLAHE(clip_limit=(1.0, 2.0), p=1.0)
+        bbox_params = A.BboxParams(format="yolo", label_fields=["class_labels"], min_visibility=0.70)
+    return A.Compose([rotate, brightness, A.OneOf([blur, clahe], p=0.25)], bbox_params=bbox_params, seed=seed)
+
+
 def augment_training(records: list[Record], output_root: Path, fraction: float, seed: int) -> int:
     if fraction <= 0:
         return 0
-    transform = A.Compose(
-        [
-            A.Rotate(angle_range=(-7, 7), border_mode=cv2.BORDER_CONSTANT, p=0.70),
-            A.RandomBrightnessContrast(brightness_range=(-0.10, 0.10), contrast_range=(-0.10, 0.10), p=0.65),
-            A.OneOf([A.GaussianBlur(blur_range=(3, 3), p=1.0), A.CLAHE(clip_range=(1.0, 2.0), p=1.0)], p=0.25),
-        ],
-        bbox_params=A.BboxParams(coord_format="yolo", label_fields=["class_labels"], min_visibility=0.70),
-        seed=seed,
-    )
+    transform = build_augmentation(seed)
     candidates = [record for record in records if record.split == "train" and record.boxes]
     random.Random(seed).shuffle(candidates)
     count = max(0, round(len(candidates) * fraction))

@@ -5,7 +5,7 @@ import tempfile
 import unittest
 
 from src.colab_workflow import build_parser
-from src.prepare_dataset import parse_label, patient_key, resolve_dataset_root
+from src.prepare_dataset import build_augmentation, parse_label, patient_key, resolve_dataset_root
 
 
 class PipelineTests(unittest.TestCase):
@@ -55,6 +55,9 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual("yolo26s.pt", args.model)
         self.assertIsNone(getattr(args, "max_train_images", None))
         self.assertEqual(640, args.imgsz)
+
+    def test_augmentation_policy_builds_with_installed_backend(self) -> None:
+        self.assertIsNotNone(build_augmentation(seed=42))
 
 
 if __name__ == "__main__":

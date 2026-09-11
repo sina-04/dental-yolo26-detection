@@ -1,4 +1,5 @@
 ultralytics==8.4.145
-albumentationsx==2.4.6
+albumentations==2.0.8
 kagglehub==1.0.2
 ImageHash==4.3.2
+numpy>=2.0,<2.3
