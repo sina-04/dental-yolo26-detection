@@ -17,12 +17,12 @@ from src.prepare_dataset import (
 
 
 class PipelineTests(unittest.TestCase):
-    def test_detection_line_is_preserved_with_offset(self) -> None:
+    def test_detection_line_is_preserved(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             label = Path(directory) / "sample.txt"
             label.write_text("2 0.5 0.4 0.2 0.1\n", encoding="utf-8")
-            boxes, issues, polygons = parse_label(label, class_offset=7, class_count=31)
-        self.assertEqual(9, boxes[0].class_id)
+            boxes, issues, polygons = parse_label(label, class_count=31)
+        self.assertEqual(2, boxes[0].class_id)
         self.assertEqual((0.5, 0.4, 0.2, 0.1), (boxes[0].x, boxes[0].y, boxes[0].w, boxes[0].h))
         self.assertEqual([], issues)
         self.assertEqual(0, polygons)
@@ -31,8 +31,8 @@ class PipelineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             label = Path(directory) / "sample.txt"
             label.write_text("1 0.2 0.3 0.6 0.3 0.6 0.7 0.2 0.7\n", encoding="utf-8")
-            boxes, issues, polygons = parse_label(label, class_offset=7, class_count=31)
-        self.assertEqual(8, boxes[0].class_id)
+            boxes, issues, polygons = parse_label(label, class_count=31)
+        self.assertEqual(1, boxes[0].class_id)
         self.assertAlmostEqual(0.4, boxes[0].x)
         self.assertAlmostEqual(0.5, boxes[0].y)
         self.assertAlmostEqual(0.4, boxes[0].w)
@@ -41,21 +41,21 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(1, polygons)
 
     def test_patient_group_hides_cleartext_name_and_groups_roboflow_variants(self) -> None:
-        first = patient_key("disease", "000dc27f-PATIENT_NAME_2020-07-12_jpg.rf.aaaaaaaa")
-        second = patient_key("disease", "000dc27f-PATIENT_NAME_2020-07-12_jpg.rf.bbbbbbbb")
+        first = patient_key("000dc27f-PATIENT_NAME_2020-07-12_jpg.rf.aaaaaaaa")
+        second = patient_key("000dc27f-PATIENT_NAME_2020-07-12_jpg.rf.bbbbbbbb")
         self.assertEqual(first, second)
         self.assertNotIn("patient", first)
         self.assertNotIn("name", first)
 
     def test_dataset_root_is_resolved_from_nested_colab_download(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            nested = Path(directory) / "download" / "Dental Dataset"
+            nested = Path(directory) / "download" / "Dental X-Ray Panoramic Dataset"
             nested.mkdir(parents=True)
             nested.joinpath("data.yaml").write_text(
-                "names:\n" + "".join(f"  {index}: class_{index}\n" for index in range(7)),
+                "names:\n" + "".join(f"  {index}: class_{index}\n" for index in range(31)),
                 encoding="utf-8",
             )
-            resolved = resolve_dataset_root(None, [Path(directory)], 7, "test")
+            resolved = resolve_dataset_root(None, [Path(directory)], 31, "test")
         self.assertEqual(nested.resolve(), resolved)
 
     def test_colab_profile_defaults_to_full_data_yolo26s(self) -> None:
@@ -69,9 +69,9 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(128, args.minority_target_instances)
 
     def test_class_aware_augmentation_caps_rare_patient_reuse(self) -> None:
-        rare = Record("disease", "train", Path("rare.jpg"), None, "p1", [Box(0, 0.5, 0.5, 0.1, 0.1)], output_id="rare", split="train")
+        rare = Record("panoramic", "train", Path("rare.jpg"), None, "p1", [Box(0, 0.5, 0.5, 0.1, 0.1)], output_id="rare", split="train")
         common = Record(
-            "disease",
+            "panoramic",
             "train",
             Path("common.jpg"),
             None,

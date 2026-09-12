@@ -9,8 +9,7 @@ import sys
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-ANATOMY_HANDLE = "saisiddartha69/dental-anatomy-dataset-yolov8/versions/1"
-DISEASE_HANDLE = "lokisilvres/dental-disease-panoramic-detection-dataset/versions/6"
+DATASET_HANDLE = "lokisilvres/dental-disease-panoramic-detection-dataset/versions/6"
 
 
 def run(command: list[str]) -> None:
@@ -65,6 +64,7 @@ def prepare(
     dataset = PROJECT_ROOT / "dataset"
     reports = PROJECT_ROOT / "reports"
     marker_payload = {
+        "dataset_handle": DATASET_HANDLE,
         "augment_fraction": augment_fraction,
         "minority_target_instances": minority_target_instances,
         "max_augmentations_per_image": max_augmentations_per_image,
@@ -74,16 +74,13 @@ def prepare(
         print("Prepared dataset already passed verification; skipping rebuild.", flush=True)
         return dataset, reports
 
-    anatomy = download_dataset(ANATOMY_HANDLE, data_root / "anatomy")
-    disease = download_dataset(DISEASE_HANDLE, data_root / "disease")
+    source = download_dataset(DATASET_HANDLE, data_root / "panoramic")
     command = [
         sys.executable,
         "-m",
         "src.prepare_dataset",
-        "--anatomy-root",
-        str(anatomy),
-        "--disease-root",
-        str(disease),
+        "--source-root",
+        str(source),
         "--output",
         str(dataset),
         "--reports-root",

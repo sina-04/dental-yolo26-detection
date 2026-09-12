@@ -71,7 +71,7 @@ def main() -> None:
 
 ## Executive summary
 
-This project uses both requested Kaggle datasets to build a single YOLO26 object detector. The class ontologies are intentionally namespaced (`anatomy_*` and `disease_*`) because the first dataset labels tooth anatomy while the second labels diseases, treatments, and anatomical structures. Segmentation polygons in the disease dataset were converted to axis-aligned detection boxes. Patient/exam groups inferred from filenames were hashed before being written to processed manifests, and no patient group crosses train, validation, and test splits.
+This project uses only the 31-class Dental X-Ray Panoramic Dataset to build a YOLO26 object detector. Segmentation polygons are converted to axis-aligned detection boxes when present. Patient/exam groups inferred from filenames are hashed before being written to processed manifests, and no inferred patient group crosses train, validation, and test splits.
 
 The selected model is **{final['selected_experiment']}**, chosen only by validation mAP50-95. Its held-out test mAP50-95 is **{test.get('metrics/mAP50-95(B)', 0.0):.4f}**, mAP50 is **{test.get('metrics/mAP50(B)', 0.0):.4f}**, precision is **{test.get('metrics/precision(B)', 0.0):.4f}**, and recall is **{test.get('metrics/recall(B)', 0.0):.4f}**. At the validation-selected confidence threshold of **{final['validation_selected_threshold']:.2f}**, the custom IoU=0.50 test F1 is **{custom['f1']:.4f}**.
 
@@ -83,10 +83,9 @@ This is an educational research result, not a clinically validated diagnostic de
 
 ## Data provenance and licensing
 
-- [Dental Anatomy Dataset — YOLOv8](https://www.kaggle.com/datasets/saisiddartha69/dental-anatomy-dataset-yolov8), Kaggle version 1, Kaggle metadata license CC BY-SA 4.0. The embedded Roboflow export declares CC BY 4.0; downstream users should resolve this license inconsistency before redistribution.
 - [Dental Disease Panoramic Detection Dataset](https://www.kaggle.com/datasets/lokisilvres/dental-disease-panoramic-detection-dataset), Kaggle version 6, Apache 2.0.
 
-The anatomy export contains seven tooth-type classes. The panoramic export contains 31 classes, including diseases, treatments, devices, teeth, and anatomy. These are not semantically interchangeable, so merging by numeric class ID would have been invalid.
+The panoramic export contains 31 classes spanning diseases, treatments, devices, teeth, and anatomy. The source images are not redistributed by this repository.
 
 ## Quality control and preparation
 
@@ -94,7 +93,7 @@ The anatomy export contains seven tooth-type classes. The panoramic export conta
 - Source counts: `{audit.get('source_counts', {})}`.
 - Final split counts: `{audit.get('split_counts', {})}`.
 - Exact duplicate files removed: **{audit.get('exact_duplicates_removed', 0)}**.
-- Disease segmentation polygons converted to boxes: **{audit.get('polygon_annotations_converted', 0)}**.
+- Segmentation polygons converted to boxes: **{audit.get('polygon_annotations_converted', 0)}**.
 - Patient-group leakage count: **{audit.get('patient_group_leakage', 0)}**.
 - Offline medically mild AlbumentationsX training images: **{audit.get('augmented_training_images', 0)}**.
 - Coordinate/annotation issues: `{audit.get('issue_counts', {})}`.
@@ -109,7 +108,7 @@ Automatic QC checked image decodability, missing/malformed labels, class ranges,
 
 ## Split strategy
 
-The pipeline reconstructs splits from patient/exam groups instead of trusting the publisher-provided Roboflow split. For the anatomy set, the original figure identifier is the conservative group. For the disease set, tokens likely to identify a patient are normalized, immediately hashed, and never written in clear text to the processed manifest. A deterministic greedy multilabel group allocation targets 75% train, 15% validation, and 10% test while reducing class-distribution drift. Exact visual duplicates are removed before splitting; perceptual near-duplicates remain grouped and are listed for review.
+The pipeline reconstructs splits from inferred patient/exam groups instead of trusting the publisher-provided Roboflow split. Tokens likely to identify a patient are normalized, immediately hashed, and never written in clear text to the processed manifest. A deterministic greedy multilabel group allocation targets 75% train, 15% validation, and 10% test while reducing class-distribution drift. Exact visual duplicates are removed before splitting; identical perceptual hashes are grouped and near-duplicate candidates are listed for review.
 
 Because patient identifiers were inferred from filenames rather than verified against a clinical master index, patient separation is best-effort and remains a limitation.
 
@@ -125,7 +124,7 @@ Because patient identifiers were inferred from filenames rather than verified ag
 - Early stopping, weight decay 0.0005, deterministic seed 42: **enabled**
 - Offline AlbumentationsX: rotation ±7°, mild brightness/contrast, low-probability 3×3 Gaussian blur or CLAHE; bounding boxes transformed together with images
 
-The checkpoint and image size were selected explicitly for the recorded hardware profile. The public repository preserves the earlier 2 GB local run as a baseline, while the Colab workflow defaults to a larger YOLO26s model and full-resolution training.
+The checkpoint and image size were selected explicitly for the recorded hardware profile. The Colab workflow defaults to a YOLO26s model and full-resolution training; local runs can use YOLO26n when compute is limited.
 
 ## Validation experiment comparison
 
@@ -163,7 +162,7 @@ Ground truth is green and model prediction is red in the ten locally saved test 
 |---|---|---|---|---|---|
 {error_table}
 
-Recurring risks include small lesions, low contrast, overlapping anatomy, severe class imbalance, publisher annotation inconsistency, polygon-to-box loss of shape information, and domain differences between anatomy imagery and panoramic radiographs. The next scientifically useful step is blinded review of false negatives and annotation candidates by qualified dental clinicians, followed by class-aware additional collection rather than indiscriminate synthetic augmentation.
+Recurring risks include small lesions, low contrast, overlapping anatomy, severe class imbalance, publisher annotation inconsistency, and polygon-to-box loss of shape information. The next scientifically useful step is blinded review of false negatives and annotation candidates by qualified dental clinicians, followed by class-aware additional collection rather than indiscriminate synthetic augmentation.
 
 ## Overfitting prevention actually used
 
@@ -181,15 +180,15 @@ Dropout was not claimed or used as a detector regularizer.
 
 ## Limitations and medical-AI warning
 
-The datasets are public secondary datasets with uncertain clinical sampling, demographics, device distributions, labeling protocols, and patient metadata. The combined taxonomy mixes anatomy, disease, treatments, and devices. Bounding boxes derived from segmentation discard lesion shape. Some classes may be too rare to estimate stable performance, and high aggregate mAP can hide clinically important minority-class failure. Patient grouping is inferred, not externally verified. There is no external-site, prospective, reader-study, calibration, robustness, fairness, security, regulatory, or clinical-utility validation.
+The source is a public secondary dataset with uncertain clinical sampling, demographics, device distributions, labeling protocol, and patient metadata. Its taxonomy mixes anatomy, disease, treatments, and devices. Bounding boxes derived from segmentation discard lesion shape. Some classes may be too rare to estimate stable performance, and high aggregate mAP can hide clinically important minority-class failure. Patient grouping is inferred, not externally verified. There is no external-site, prospective, reader-study, calibration, robustness, fairness, security, regulatory, or clinical-utility validation.
 
 False negatives could miss disease; false positives could trigger unnecessary concern or follow-up. Predictions must not be interpreted as diagnoses or used for patient care.
 
 ## Reproducibility artifacts
 
-- `src/prepare_dataset.py`: acquisition extraction, validation, conversion, grouping, splitting, augmentation, and audit
+- `src/prepare_dataset.py`: validation, conversion, grouping, splitting, augmentation, and audit
 - `src/train_evaluate.py`: transfer learning, experiment selection, final test evaluation, threshold analysis, inference, and error analysis
-- `dataset/data.yaml`: absolute local dataset configuration and 38-class ontology
+- `dataset/data.yaml`: portable generated-dataset configuration and 31-class ontology
 - `reports/dataset_manifest.csv`: privacy-hashed split manifest
 - `reports/dataset_audit.json`: QC summary
 - `reports/experiments.csv`: experiment ledger
@@ -206,7 +205,7 @@ False negatives could miss disease; false positives could trigger unnecessary co
 |---|---:|---|---|---|---|
 | Training source code | 100% | End-to-end preparation, training, validation, testing, inference, and error-analysis CLIs | Local compute constrained model scale and epoch budget | Reproducible YOLO26 workflow | Re-run on a larger GPU for longer experiments |
 | Final model weights | 100% | Selected `best.pt` and retained `last.pt` | Model capacity depends on the assigned accelerator | Validation-only selection preserves test isolation | Compare larger models only on validation data |
-| Dataset and configuration | 100% | Both sources combined, polygons boxified, group split, data.yaml generated | Source ontologies differ; inferred IDs only | Namespacing avoids false semantic merges | Clinician review and verified patient index |
+| Dataset and configuration | 100% | Single panoramic source, polygons boxified, group split, data.yaml generated | Patient groups use inferred IDs only | Single-domain training removes the former cross-domain merge | Clinician review and verified patient index |
 | Evaluation report | 100% | Full test metrics, per-class table, losses, confusion matrix, PR and threshold analysis | Rare classes yield unstable estimates | Per-class reporting exposes imbalance | Add confidence intervals with larger external test data |
 | Ten unseen examples | 100% | Representative held-out test visualizations | Some error types may not occur in a small test set | Model behavior is inspectable | Blinded expert review |
 | Error analysis | 100% | Per-image structured categories and candidate causes | Candidate causes are hypotheses, not clinical adjudication | False-negative audit is highest priority | Clinician adjudication |
@@ -217,7 +216,7 @@ False negatives could miss disease; false positives could trigger unnecessary co
 
 ## Mentor discussion
 
-- Is the 38-class namespaced ontology clinically appropriate, or should anatomy and pathology be separate models?
+- Is the 31-class mixed clinical ontology appropriate, or should pathology and treatment/device findings be modeled separately?
 - Can a verified patient identifier replace filename-based grouping?
 - Which false-negative classes are clinically highest priority?
 - Is external-site data available for a genuine generalization test?

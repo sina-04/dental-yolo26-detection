@@ -16,8 +16,7 @@ __pycache__/
 Thumbs.db
 
 # Raw upstream datasets (download from Kaggle)
-Dental Dataset/
-YOLO & COCO/
+Dental X-Ray Panoramic Dataset/
 raw/
 
 # Generated dataset payload; keep the portable ontology/configuration
@@ -26,22 +25,14 @@ dataset/labels/
 dataset/runtime/
 dataset/*.cache
 
-# Downloaded base checkpoint; selected checkpoints are retained in artifacts/
+# Downloaded checkpoints and generated training outputs
 yolo26*.pt
+artifacts/
+runs/
+reports/
 colab-results/
-
-# Regenerable logs
-reports/training_console.log
-
-# Clinical source-image derivatives stay local pending explicit privacy/license review
-reports/annotation_audit/*.jpg
-reports/inference_examples/*.jpg
-
-# Ultralytics source-image previews and machine-local paths
-runs/**/train_batch*.jpg
-runs/**/val_batch*.jpg
-runs/**/labels.jpg
-runs/**/args.yaml
+/FINAL_REPORT.md
+/PROGRESS.md
 
 # Common temporary/download fragments
 *.tmp

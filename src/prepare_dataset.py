@@ -12,7 +12,6 @@ from pathlib import Path
 import random
 import re
 import shutil
-import zipfile
 
 import albumentations as A
 import cv2
@@ -20,14 +19,14 @@ import imagehash
 from PIL import Image, ImageDraw, ImageFont
 import yaml
 
-from src.common import IMAGE_EXTENSIONS, finite_unit, list_images, load_names, opaque_id, sha256_file, slugify, write_json
+from src.common import IMAGE_EXTENSIONS, finite_unit, list_images, load_names, opaque_id, sha256_file, write_json
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DISEASE_ARCHIVE = PROJECT_ROOT / "raw" / "dental-disease-v6.zip"
 OUTPUT_ROOT = PROJECT_ROOT / "dataset"
 REPORT_ROOT = PROJECT_ROOT / "reports"
 SEED = 42
+DATASET_HANDLE = "lokisilvres/dental-disease-panoramic-detection-dataset/versions/6"
 
 
 def dataset_class_count(path: Path) -> int | None:
@@ -88,45 +87,23 @@ class Record:
     split: str = ""
 
 
-def extract_disease_yolo(archive_path: Path = DISEASE_ARCHIVE) -> Path:
-    """Extract the legacy disease archive and return its destination directory."""
-    destination = PROJECT_ROOT / "raw" / "dental-disease"
-    existing = destination / "YOLO" / "YOLO"
-    if existing.exists():
-        return destination
-    if not archive_path.exists():
-        raise FileNotFoundError(f"Missing {archive_path}")
-    destination.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(archive_path) as archive:
-        members = [name for name in archive.namelist() if name.replace("\\", "/").startswith("YOLO/YOLO/")]
-        if not members:
-            raise RuntimeError("The Kaggle archive does not contain YOLO/YOLO")
-        for member in members:
-            archive.extract(member, destination)
-    return destination
-
-
-def patient_key(source: str, stem: str) -> str:
+def patient_key(stem: str) -> str:
     base = re.split(r"\.rf\.", stem, maxsplit=1, flags=re.IGNORECASE)[0]
-    if source == "anatomy":
-        match = re.search(r"fig[_-]?(\d+)", base, flags=re.IGNORECASE)
-        identity = f"fig:{match.group(1)}" if match else base
-    else:
-        cleaned = re.sub(r"^[0-9a-f]{8}-", "", base, flags=re.IGNORECASE)
-        tokens = re.split(r"[_-]+", cleaned)
-        patient_tokens: list[str] = []
-        for token in tokens:
-            if re.fullmatch(r"(?:19|20)\d{2}", token) or re.search(r"\d{6,}", token):
-                break
-            if token.lower() in {"jpg", "jpeg", "png", "xray", "opg"}:
-                continue
-            if not any(character.isdigit() for character in token):
-                patient_tokens.append(token.lower())
-        identity = "_".join(patient_tokens) or base
-    return f"{source}_{opaque_id(identity, 20)}"
+    cleaned = re.sub(r"^[0-9a-f]{8}-", "", base, flags=re.IGNORECASE)
+    tokens = re.split(r"[_-]+", cleaned)
+    patient_tokens: list[str] = []
+    for token in tokens:
+        if re.fullmatch(r"(?:19|20)\d{2}", token) or re.search(r"\d{6,}", token):
+            break
+        if token.lower() in {"jpg", "jpeg", "png", "xray", "opg"}:
+            continue
+        if not any(character.isdigit() for character in token):
+            patient_tokens.append(token.lower())
+    identity = "_".join(patient_tokens) or base
+    return f"panoramic_{opaque_id(identity, 20)}"
 
 
-def parse_label(path: Path | None, class_offset: int, class_count: int) -> tuple[list[Box], list[str], int]:
+def parse_label(path: Path | None, class_count: int) -> tuple[list[Box], list[str], int]:
     boxes: list[Box] = []
     issues: list[str] = []
     polygon_count = 0
@@ -174,7 +151,7 @@ def parse_label(path: Path | None, class_offset: int, class_count: int) -> tuple
             issues.append(f"clipped_box:{line_number}")
         if width * height < 1e-5:
             issues.append(f"tiny_box:{line_number}")
-        boxes.append(Box(local_class + class_offset, x, y, width, height))
+        boxes.append(Box(local_class, x, y, width, height))
     if not boxes:
         issues.append("empty_annotation")
     return boxes, issues, polygon_count
@@ -185,7 +162,7 @@ def locate_label(label_dir: Path, image: Path) -> Path | None:
     return candidate if candidate.exists() else None
 
 
-def collect_source(root: Path, source: str, offset: int, class_count: int) -> tuple[list[Record], int]:
+def collect_source(root: Path, class_count: int) -> tuple[list[Record], int]:
     inputs: list[tuple[str, Path, Path]] = []
     for split_name in ("train", "valid", "val", "test"):
         split_root = root / split_name
@@ -198,13 +175,13 @@ def collect_source(root: Path, source: str, offset: int, class_count: int) -> tu
     def inspect(item: tuple[str, Path, Path]) -> tuple[Record, int]:
         split_name, image_path, label_dir = item
         label_path = locate_label(label_dir, image_path)
-        boxes, issues, polygon_count = parse_label(label_path, offset, class_count)
+        boxes, issues, polygon_count = parse_label(label_path, class_count)
         record = Record(
-                source=source,
+                source="panoramic",
                 source_split="val" if split_name == "valid" else split_name,
                 image=image_path,
                 label=label_path,
-                patient_group=patient_key(source, image_path.stem),
+                patient_group=patient_key(image_path.stem),
                 boxes=boxes,
                 issues=issues,
             )
@@ -226,7 +203,7 @@ def collect_source(root: Path, source: str, offset: int, class_count: int) -> tu
             records.append(record)
             polygon_total += polygon_count
             if index % 1000 == 0:
-                print(f"{source}: inspected {index}/{len(inputs)} images", flush=True)
+                print(f"panoramic: inspected {index}/{len(inputs)} images", flush=True)
     return records, polygon_total
 
 
@@ -259,42 +236,6 @@ def merge_identical_perceptual_groups(records: list[Record]) -> int:
             continue
         merged = f"{duplicates[0].source}_{opaque_id('|'.join(sorted(patient_groups)), 20)}"
         for record in duplicates:
-            if record.patient_group != merged:
-                record.patient_group = merged
-                changed += 1
-    return changed
-
-
-def merge_anatomy_near_duplicate_groups(records: list[Record], max_distance: int = 2) -> int:
-    anatomy = [record for record in records if record.source == "anatomy" and record.phash]
-    parent = list(range(len(anatomy)))
-
-    def find(index: int) -> int:
-        while parent[index] != index:
-            parent[index] = parent[parent[index]]
-            index = parent[index]
-        return index
-
-    def union(left: int, right: int) -> None:
-        left_root, right_root = find(left), find(right)
-        if left_root != right_root:
-            parent[right_root] = left_root
-
-    hashes = [int(record.phash, 16) for record in anatomy]
-    for left in range(len(anatomy)):
-        for right in range(left + 1, len(anatomy)):
-            if (hashes[left] ^ hashes[right]).bit_count() <= max_distance:
-                union(left, right)
-    clusters: dict[int, list[Record]] = defaultdict(list)
-    for index, record in enumerate(anatomy):
-        clusters[find(index)].append(record)
-    changed = 0
-    for cluster in clusters.values():
-        patient_groups = {record.patient_group for record in cluster}
-        if len(patient_groups) <= 1:
-            continue
-        merged = f"anatomy_{opaque_id('|'.join(sorted(patient_groups)), 20)}"
-        for record in cluster:
             if record.patient_group != merged:
                 record.patient_group = merged
                 changed += 1
@@ -524,11 +465,10 @@ def write_csv(path: Path, rows: list[dict[str, object]], fieldnames: list[str]) 
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Audit, combine, split, and prepare both dental datasets.")
+    parser = argparse.ArgumentParser(description="Audit, split, and prepare the Dental X-Ray Panoramic Dataset.")
     parser.add_argument("--output", type=Path, default=OUTPUT_ROOT)
     parser.add_argument("--reports-root", type=Path, default=REPORT_ROOT)
-    parser.add_argument("--anatomy-root", type=Path, help="Extracted anatomy dataset or a parent directory containing it.")
-    parser.add_argument("--disease-root", type=Path, help="Extracted disease dataset or a parent directory containing it.")
+    parser.add_argument("--source-root", type=Path, help="Extracted panoramic YOLO dataset or a parent directory containing it.")
     parser.add_argument("--augment-fraction", type=float, default=0.15)
     parser.add_argument("--minority-target-instances", type=int, default=128)
     parser.add_argument("--max-augmentations-per-image", type=int, default=8)
@@ -542,27 +482,27 @@ def main() -> None:
         shutil.rmtree(args.output)
     if args.output.exists() and any(args.output.iterdir()) and not args.resume:
         raise FileExistsError(f"Refusing to overwrite non-empty output directory: {args.output}")
+    if args.resume:
+        for generated_directory in ("images", "labels", "runtime"):
+            path = args.output / generated_directory
+            if path.exists():
+                shutil.rmtree(path)
+        annotation_audit = args.reports_root / "annotation_audit"
+        if annotation_audit.exists():
+            shutil.rmtree(annotation_audit)
 
-    anatomy_root = resolve_dataset_root(
-        args.anatomy_root,
-        [PROJECT_ROOT / "Dental Dataset", PROJECT_ROOT / "raw" / "dental-anatomy"],
-        expected_classes=7,
-        label="dental anatomy",
+    source_root = resolve_dataset_root(
+        args.source_root,
+        [PROJECT_ROOT / "Dental X-Ray Panoramic Dataset", PROJECT_ROOT / "raw" / "dental-xray-panoramic"],
+        expected_classes=31,
+        label="Dental X-Ray Panoramic Dataset",
     )
-    disease_candidates = [PROJECT_ROOT / "YOLO & COCO", PROJECT_ROOT / "raw" / "dental-disease"]
-    if not args.disease_root and not any(path.exists() for path in disease_candidates) and DISEASE_ARCHIVE.exists():
-        disease_candidates.insert(0, extract_disease_yolo())
-    disease_root = resolve_dataset_root(args.disease_root, disease_candidates, expected_classes=31, label="panoramic disease")
-    anatomy_names = load_names(anatomy_root / "data.yaml")
-    disease_names = load_names(disease_root / "data.yaml")
-    names = [f"anatomy_{slugify(name)}" for name in anatomy_names] + [f"disease_{slugify(name)}" for name in disease_names]
+    names = [name.strip() for name in load_names(source_root / "data.yaml")]
 
-    anatomy_records, anatomy_polygons = collect_source(anatomy_root, "anatomy", 0, len(anatomy_names))
-    disease_records, disease_polygons = collect_source(disease_root, "disease", len(anatomy_names), len(disease_names))
-    all_records = [record for record in anatomy_records + disease_records if not any(issue.startswith("corrupt_image") for issue in record.issues)]
+    panoramic_records, polygon_annotations = collect_source(source_root, len(names))
+    all_records = [record for record in panoramic_records if not any(issue.startswith("corrupt_image") for issue in record.issues)]
     all_records, exact_duplicates = remove_exact_duplicates(all_records)
     perceptual_group_merges = merge_identical_perceptual_groups(all_records)
-    anatomy_near_group_merges = merge_anatomy_near_duplicate_groups(all_records)
     assign_splits(all_records, len(names))
     materialize(all_records, args.output)
     augmented_count = augment_training(
@@ -628,8 +568,10 @@ def main() -> None:
     patient_leakage = sum(len(splits) > 1 for splits in patient_splits.values())
     audit = {
         "seed": args.seed,
-        "dataset_versions": {"dental_anatomy": 1, "dental_disease": 6},
-        "licenses": {"dental_anatomy_kaggle": "CC BY-SA 4.0", "dental_anatomy_embedded_roboflow": "CC BY 4.0", "dental_disease": "Apache 2.0"},
+        "dataset": "Dental X-Ray Panoramic Dataset",
+        "dataset_handle": DATASET_HANDLE,
+        "dataset_version": 6,
+        "license": "Apache 2.0",
         "source_counts": dict(source_counts),
         "split_counts": dict(split_counts),
         "class_count": len(names),
@@ -638,15 +580,14 @@ def main() -> None:
         "exact_duplicates_removed": len(exact_duplicates),
         "near_duplicate_candidates": len(near_pairs),
         "records_regrouped_by_identical_perceptual_hash": perceptual_group_merges,
-        "anatomy_records_regrouped_by_phash_distance_le_2": anatomy_near_group_merges,
-        "polygon_annotations_converted": anatomy_polygons + disease_polygons,
+        "polygon_annotations_converted": polygon_annotations,
         "augmented_training_images": augmented_count,
         "minority_target_instances": args.minority_target_instances,
         "max_augmentations_per_image": args.max_augmentations_per_image,
         "issue_counts": dict(issue_counts),
         "images_after_exact_deduplication": len(all_records),
         "instances": sum(len(record.boxes) for record in all_records),
-        "raw_filename_privacy": "Raw disease filenames may contain names. Processed filenames and manifests use opaque IDs only.",
+        "raw_filename_privacy": "Raw panoramic filenames may contain identifying text. Processed filenames and manifests use opaque IDs only.",
         "manual_audit_status": "Class-stratified visual sheets generated for human/clinical review; automated checks are complete.",
     }
     write_json(args.reports_root / "dataset_audit.json", audit)

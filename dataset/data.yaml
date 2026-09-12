@@ -2,41 +2,34 @@ train: images/train
 val: images/val
 test: images/test
 names:
-  0: anatomy_1st_molar
-  1: anatomy_1st_premolar
-  2: anatomy_2nd_molar
-  3: anatomy_2nd_premolar
-  4: anatomy_canine
-  5: anatomy_central_incisor
-  6: anatomy_lateral_incisor
-  7: disease_caries
-  8: disease_crown
-  9: disease_filling
-  10: disease_implant
-  11: disease_malaligned
-  12: disease_mandibular_canal
-  13: disease_missing_teeth
-  14: disease_periapical_lesion
-  15: disease_retained_root
-  16: disease_root_canal_treatment
-  17: disease_root_piece
-  18: disease_impacted_tooth
-  19: disease_maxillary_sinus
-  20: disease_bone_loss
-  21: disease_fracture_teeth
-  22: disease_permanent_teeth
-  23: disease_supra_eruption
-  24: disease_tad
-  25: disease_abutment
-  26: disease_attrition
-  27: disease_bone_defect
-  28: disease_gingival_former
-  29: disease_metal_band
-  30: disease_orthodontic_brackets
-  31: disease_permanent_retainer
-  32: disease_post_core
-  33: disease_plating
-  34: disease_wire
-  35: disease_cyst
-  36: disease_root_resorption
-  37: disease_primary_teeth
+  0: Caries
+  1: Crown
+  2: Filling
+  3: Implant
+  4: Malaligned
+  5: Mandibular Canal
+  6: Missing teeth
+  7: Periapical lesion
+  8: Retained root
+  9: Root Canal Treatment
+  10: Root Piece
+  11: impacted tooth
+  12: maxillary sinus
+  13: Bone Loss
+  14: Fracture teeth
+  15: Permanent Teeth
+  16: Supra Eruption
+  17: TAD
+  18: abutment
+  19: attrition
+  20: bone defect
+  21: gingival former
+  22: metal band
+  23: orthodontic brackets
+  24: permanent retainer
+  25: post - core
+  26: plating
+  27: wire
+  28: Cyst
+  29: Root resorption
+  30: Primary teeth

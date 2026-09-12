@@ -75,22 +75,16 @@ def create_runtime_data_yaml(max_train_images: int | None, seed: int) -> tuple[P
     rng = random.Random(seed)
     selected: set[Path] = set()
     for class_id in sorted(class_candidates, key=lambda item: len(class_candidates[item])):
+        slots = max_train_images - len(selected)
+        if slots <= 0:
+            break
         candidates = class_candidates[class_id].copy()
         rng.shuffle(candidates)
-        selected.update(candidates[: min(5, len(candidates))])
-    anatomy = [image for image in images if image.name.startswith("anatomy_") and image not in selected]
-    disease = [image for image in images if image.name.startswith("disease_") and image not in selected]
-    rng.shuffle(anatomy)
-    rng.shuffle(disease)
-    anatomy_target = min(len(anatomy), max(100, round(max_train_images * 0.15)))
-    selected.update(anatomy[: max(0, anatomy_target - sum(image.name.startswith("anatomy_") for image in selected))])
-    remaining = max_train_images - len(selected)
-    selected.update(disease[: max(0, remaining)])
-    if len(selected) < max_train_images:
-        leftovers = [image for image in images if image not in selected]
-        rng.shuffle(leftovers)
-        selected.update(leftovers[: max_train_images - len(selected)])
-    chosen = sorted(selected)[:max_train_images]
+        selected.update(candidates[: min(5, len(candidates), slots)])
+    remaining = [image for image in images if image not in selected]
+    rng.shuffle(remaining)
+    selected.update(remaining[: max(0, max_train_images - len(selected))])
+    chosen = sorted(selected)
     runtime_dir = DATA_YAML.parent / "runtime"
     runtime_dir.mkdir(parents=True, exist_ok=True)
     train_list = runtime_dir / "train.txt"
@@ -353,15 +347,7 @@ def aggregate_custom_metrics(predictions: dict[str, list[Prediction]], split: st
 def render_examples(model_predictions: dict[str, list[Prediction]], per_image: list[dict[str, Any]], threshold: float, names: list[str], count: int = 10) -> list[dict[str, Any]]:
     image_dir = DATA_YAML.parent / "images" / "test"
     ranked = sorted(per_image, key=lambda row: (-(row["fn"] + row["fp"] + row["misclassification"] + row["poor_localization"]), row["image_id"]))
-    selected: list[dict[str, Any]] = []
-    # Preserve both source domains in the qualitative audit instead of allowing
-    # dense anatomy images alone to dominate an error-count ranking.
-    per_source_target = count // 2
-    for prefix in ("anatomy_", "disease_"):
-        selected.extend([row for row in ranked if row["image_id"].startswith(prefix)][:per_source_target])
-    selected_ids = {row["image_id"] for row in selected}
-    selected.extend(row for row in ranked if row["image_id"] not in selected_ids and len(selected) < count)
-    selected = selected[:count]
+    selected = ranked[:count]
     output_dir = REPORTS / "inference_examples"
     output_dir.mkdir(parents=True, exist_ok=True)
     for old_example in output_dir.glob("example_*.jpg"):
