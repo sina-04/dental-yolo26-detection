@@ -1,0 +1,12 @@
+model: yolo26s.pt
+baseline_epochs: 100
+tuned_epochs: 100
+imgsz: 640
+batch: 16
+workers: 2
+patience: 20
+cache: disk
+amp: true
+seed: 42
+run_prefix: panoramic31_yolo26s_t4_v1
+save_period: 1

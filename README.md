@@ -2,76 +2,115 @@
 
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/sina-04/dental-yolo26-detection/blob/main/notebooks/dental_yolo26_colab.ipynb)
 
-An end-to-end Ultralytics YOLO26 pipeline for detecting dental findings in panoramic X-rays. The project now uses only the **Dental X-Ray Panoramic Dataset** and its 31-class YOLO export; the former intraoral anatomy dataset and mixed 38-class ontology have been removed.
+A reproducible Ultralytics YOLO26 object-detection project for panoramic dental X-rays. It uses only the **Dental X-Ray Panoramic Dataset** and preserves all 31 source classes. The previous intraoral dataset and mixed 38-class ontology are no longer part of this project.
 
-> This is an educational research project, not a clinically validated diagnostic system. Do not use its predictions for patient care.
+> Educational research only. This is not a clinically validated diagnostic system and must not be used for patient care.
 
-## What the pipeline does
+## Current status
 
-- Locates the dataset from either the local project folder or a downloaded Kaggle directory.
-- Validates images and YOLO annotations, including polygon-to-box conversion when needed.
-- Removes exact duplicates and groups Roboflow variants by a privacy-preserving patient/exam hash.
-- Rebuilds deterministic 75/15/10 train, validation, and test splits to reduce leakage.
-- Applies capped, train-only class-aware augmentation for minority classes.
-- Compares a baseline and a medically constrained augmented YOLO26 experiment.
-- Selects the checkpoint using validation mAP50-95, then evaluates the test split once.
-- Produces per-class metrics, threshold analysis, error analysis, and reproducibility metadata.
+The repository contains the complete preparation, training, validation-selection, held-out testing, reporting, and inference workflow. It does not claim new YOLO26 results until the staged Colab run has produced them. Generated data, clinical-image derivatives, model weights, and run outputs are intentionally excluded from Git.
 
 ## Dataset
 
-The only data source is the [Dental Disease Panoramic Detection Dataset](https://www.kaggle.com/datasets/lokisilvres/dental-disease-panoramic-detection-dataset), used as the local **Dental X-Ray Panoramic Dataset** folder.
+The sole source is [Dental Disease Panoramic Detection Dataset, version 6](https://www.kaggle.com/datasets/lokisilvres/dental-disease-panoramic-detection-dataset), referred to in this project as **Dental X-Ray Panoramic Dataset**.
 
-- Kaggle version: 6
-- License reported by the source: Apache 2.0
-- Native export formats: YOLO and COCO
-- Native YOLO split: 9,481 train, 2,871 validation, and 1,580 test images
+- Source-reported license: Apache 2.0
+- Native YOLO export: 9,481 train, 2,871 validation, 1,580 test images
+- Total native images: 13,932
 - Detection classes: 31
+- Labels: YOLO boxes and polygons; polygons are converted to axis-aligned boxes
 
-The raw dataset is excluded from Git because it is large and source filenames may contain identifying text. Review the upstream license and privacy implications before redistributing any images. The preparation pipeline replaces raw filenames with opaque IDs in generated data and manifests.
+The native split is not used. Filename-derived exam groups overlap substantially across its partitions, so preparation removes exact duplicates, groups visually similar variants, and deterministically reconstructs a 75/15/10 train/validation/test split. Grouping is best-effort because a verified clinical patient index is unavailable.
 
-### Classes
+The full 31-label ontology is retained. Very rare classes remain in the model but their class-level metrics are explicitly marked `N/E`, `very_low`, or `limited` according to held-out support; they are not presented as reliable estimates.
 
-`Caries`, `Crown`, `Filling`, `Implant`, `Malaligned`, `Mandibular Canal`, `Missing teeth`, `Periapical lesion`, `Retained root`, `Root Canal Treatment`, `Root Piece`, `impacted tooth`, `maxillary sinus`, `Bone Loss`, `Fracture teeth`, `Permanent Teeth`, `Supra Eruption`, `TAD`, `abutment`, `attrition`, `bone defect`, `gingival former`, `metal band`, `orthodontic brackets`, `permanent retainer`, `post - core`, `plating`, `wire`, `Cyst`, `Root resorption`, and `Primary teeth`.
+## Experiment design
+
+Two validation-controlled YOLO26s experiments use identical optimizer, schedule, image size, and regularization settings:
+
+1. `baseline`: original training images only.
+2. `medical_aug`: original plus capped, class-aware, medically constrained augmentations.
+
+Both run for up to 100 epochs with early stopping. The selected checkpoint is determined by validation mAP50-95, with validation recall as the tie-breaker. The test split is evaluated only in the separate test phase, after selection. Its operating confidence threshold is chosen on validation data.
+
+The default Google Colab T4 profile is in `configs/colab_t4.yaml`: YOLO26s, 640 px, batch 16, AdamW, cosine learning-rate decay, 20-epoch patience, disk cache, AMP, seed 42, and checkpoint saving every epoch.
+
+## Data and audit safeguards
+
+Preparation performs:
+
+- image decoding and annotation validation;
+- polygon-to-box conversion;
+- exact SHA-256 deduplication;
+- perceptual-hash grouping of identical and near-duplicate images;
+- privacy-hashed filename-derived exam grouping;
+- deterministic multilabel group splitting;
+- train-only augmentation with no synthetic validation/test images;
+- isolated `base` and `augmented` training manifests;
+- a dataset-contract fingerprint; and
+- five-image annotation contact sheets for every class.
+
+Training is blocked until a reviewer inspects all 31 contact sheets and records approval for the current dataset fingerprint. Changing the source manifest, class order, split/grouping version, seed, or augmentation settings changes the fingerprint and invalidates stale approvals and run resumptions.
 
 ## Project structure
 
 ```text
 .
+├── configs/
+│   └── colab_t4.yaml             # canonical free-T4 training profile
 ├── dataset/
-│   └── data.yaml                 # portable 31-class generated-dataset config
+│   └── data.yaml                 # public 31-class ontology template
 ├── notebooks/
-│   └── dental_yolo26_colab.ipynb # end-to-end Colab workflow
+│   └── dental_yolo26_colab.ipynb # staged prepare/audit/train/test/report run
 ├── src/
-│   ├── colab_workflow.py         # Kaggle download, prepare, verify, train
-│   ├── common.py                 # shared file, hashing, and YAML helpers
-│   ├── generate_report.py        # final report and progress generator
-│   ├── prepare_dataset.py        # QC, grouping, splitting, augmentation
-│   ├── train_evaluate.py         # training, selection, test, error analysis
-│   └── verify_dataset.py         # processed-dataset integrity checks
+│   ├── approve_audit.py          # fingerprint-bound annotation-audit approval
+│   ├── colab_workflow.py         # resumable Colab stage orchestration
+│   ├── common.py                 # hashing, paths, JSON, and YAML helpers
+│   ├── generate_report.py        # final report and deliverable progress
+│   ├── infer.py                  # annotated-image and JSON inference CLI
+│   ├── prepare_dataset.py        # QC, dedupe, grouping, split, augmentation
+│   ├── train_evaluate.py         # train/select and isolated test phases
+│   └── verify_dataset.py         # leakage and training-view integrity checks
 ├── tests/
 │   └── test_pipeline.py
 ├── requirements.txt
 └── requirements-colab.txt
 ```
 
-These local/generated paths are intentionally not committed:
+Generated paths such as `dataset/images/`, `dataset/labels/`, `dataset/runtime/`, `dataset/fingerprint.json`, `reports/`, `runs/`, `artifacts/`, and `inference_output/` are ignored by Git.
+
+## Recommended Google Colab workflow
+
+Open the notebook using the badge and select a T4 GPU. It installs `requirements-colab.txt`, downloads only Kaggle dataset version 6 to Colab's ephemeral SSD, and writes resumable training outputs to:
 
 ```text
-Dental X-Ray Panoramic Dataset/  # raw YOLO/COCO source and source checkpoints
-dataset/images/                  # prepared images
-dataset/labels/                  # prepared labels
-artifacts/                       # selected weights and environment snapshot
-reports/                         # audit, metrics, plots, and error analysis
-runs/                            # Ultralytics run outputs
+MyDrive/dental-yolo26-detection/panoramic31-yolo26s-t4-v1/
 ```
 
-## Local setup
+The notebook intentionally uses separate cells:
 
-Requirements:
+1. Prepare and verify the dataset.
+2. Display and review all 31 annotation contact sheets.
+3. Record fingerprint-bound audit approval.
+4. Train both experiments and select using validation data.
+5. Evaluate the held-out test once.
+6. Generate the final report and progress table.
 
-- Python 3.11 or newer
-- A CUDA-capable GPU is recommended for training
-- Enough disk space for the raw and rebuilt datasets
+Equivalent commands inside the cloned repository are:
+
+```bash
+python -m src.colab_workflow --stage prepare --rebuild-data
+python -m src.approve_audit --reviewer "Reviewer name" --notes "Concise findings after reviewing all 31 sheets"
+python -m src.colab_workflow --stage train --profile configs/colab_t4.yaml
+python -m src.colab_workflow --stage test --profile configs/colab_t4.yaml
+python -m src.colab_workflow --stage report
+```
+
+Do not use `--force-test` for iterative tuning. It exists only for an intentional rerun of the same final checkpoint and dataset.
+
+## Local preparation
+
+Python 3.11 or newer is recommended. A CUDA GPU is needed for the canonical training profile.
 
 ```powershell
 git clone https://github.com/sina-04/dental-yolo26-detection.git
@@ -82,90 +121,57 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
 
-Place the extracted dataset at the default location:
-
-```text
-Dental X-Ray Panoramic Dataset/
-└── YOLO/
-    └── YOLO/
-        ├── data.yaml
-        ├── train/{images,labels}/
-        ├── valid/{images,labels}/
-        └── test/{images,labels}/
-```
-
-You can instead pass any parent directory containing the 31-class YOLO export with `--source-root`.
-
-## Prepare and verify
-
-Rebuild the processed dataset from the local default path:
-
-```powershell
-python -m src.prepare_dataset --rebuild
-python -m src.verify_dataset
-```
-
-For a custom extraction location:
+Place the extracted dataset under `Dental X-Ray Panoramic Dataset/`, or pass a parent directory containing its 31-class YOLO export:
 
 ```powershell
 python -m src.prepare_dataset --source-root "D:\datasets\Dental X-Ray Panoramic Dataset" --rebuild
+python -m src.verify_dataset
 ```
 
-Preparation ignores the publisher's split assignment and reconstructs groups so variants inferred to belong to the same patient/exam cannot cross splits. Because the grouping key is inferred from filenames rather than verified against a clinical patient index, leakage prevention remains best-effort.
-
-Useful preparation options:
-
-```text
---augment-fraction 0.15
---minority-target-instances 128
---max-augmentations-per-image 8
---seed 42
-```
-
-## Train and evaluate
-
-Run the default local profile:
+Review `reports/annotation_audit/class_00.jpg` through `class_30.jpg`, then approve and train:
 
 ```powershell
-python -m src.train_evaluate --model yolo26n.pt --device auto
+python -m src.approve_audit --reviewer "Reviewer name" --notes "Review findings"
+python -m src.train_evaluate --phase train --profile configs/colab_t4.yaml --device 0 --resume
+python -m src.train_evaluate --phase test --profile configs/colab_t4.yaml --device 0
 python -m src.generate_report
 ```
 
-For a constrained smoke run, cap only the training images; validation and test remain complete:
+## Inference
+
+After the test phase, inference defaults to the confidence threshold selected on validation data:
 
 ```powershell
-python -m src.train_evaluate --model yolo26n.pt --max-train-images 1200 --baseline-epochs 1 --tuned-epochs 2
+python -m src.infer "path\to\panoramic-xray.jpg"
 ```
 
-Training outputs are written to `runs/`, `reports/`, and `artifacts/`. These outputs are ignored so a checkpoint trained on the retired mixed ontology cannot be mistaken for a compatible 31-class model. Publish new weights only after retraining and documenting their metrics.
-
-## Google Colab
-
-Open the notebook with the badge above and select a GPU runtime. The workflow:
-
-1. mounts Google Drive;
-2. clones this repository;
-3. installs Colab-safe dependencies;
-4. downloads only Kaggle version 6 of the panoramic dataset;
-5. prepares and verifies the 31-class dataset on Colab's local SSD;
-6. resumes training from Drive-backed checkpoints when available; and
-7. saves metrics, reports, and weights under `MyDrive/dental-yolo26-detection/colab-results/`.
-
-The equivalent command is:
+For Drive-backed Colab results or another checkpoint:
 
 ```bash
-python -m src.colab_workflow \
-  --stage all \
-  --data-root /content/dental_yolo26_data \
-  --results-root /content/drive/MyDrive/dental-yolo26-detection/colab-results \
-  --model yolo26s.pt \
-  --imgsz 640 \
-  --batch 32 \
-  --baseline-epochs 15 \
-  --tuned-epochs 100
+python -m src.infer /content/xrays \
+  --weights /content/drive/MyDrive/dental-yolo26-detection/panoramic31-yolo26s-t4-v1/artifacts/best.pt \
+  --metrics /content/drive/MyDrive/dental-yolo26-detection/panoramic31-yolo26s-t4-v1/reports/final_metrics.json \
+  --output /content/predictions
 ```
 
-If a Colab GPU runs out of memory, reduce `--batch` to 16 or 8. Use `--rebuild-data` when changing dataset-preparation options or migrating from the former two-dataset pipeline.
+Each image produces an annotated JPEG and a JSON file containing class ID, class name, confidence, and pixel `xyxy` coordinates.
+
+## Relationship to the reference application
+
+[Loki-Silvres/Dental-Disease-Detection](https://github.com/Loki-Silvres/Dental-Disease-Detection) is a useful functional inference reference for this domain. Its separately distributed checkpoint is a trained Ultralytics YOLOv8x-seg model, while this project targets YOLO26 object detection and adds the missing reproducible preparation, training, evaluation, experiment comparison, leakage controls, error analysis, and Colab workflow.
+
+Metadata safely inspected from that legacy checkpoint reports box mAP50 0.2971, box mAP50-95 0.1567, and mask mAP50-95 0.1160. These are contextual figures only: the repository lacks its training code and verifiable split construction, and its results must not be treated as a directly comparable benchmark.
+
+## Outputs after a completed run
+
+- `artifacts/best.pt` and `last.pt`
+- `artifacts/training_configuration.json` and `environment_freeze.txt`
+- `reports/selection.json`, `experiments.csv`, and `final_metrics.json`
+- per-class test metrics with evidence tiers
+- validation threshold analysis
+- confusion matrices and training curves under `runs/`
+- ten structured held-out error examples
+- `FINAL_REPORT.md` and `PROGRESS.md`
 
 ## Tests
 
@@ -173,14 +179,14 @@ If a Colab GPU runs out of memory, reduce `--batch` to 16 or 8. Use `--rebuild-d
 python -m unittest discover -s tests -v
 ```
 
-The tests cover label parsing, polygon-to-box conversion, privacy-preserving patient grouping, nested dataset discovery, augmentation caps, and resumable Colab markers. `src.verify_dataset` performs the full generated-dataset integrity check.
+Tests cover label conversion, privacy-preserving grouping, near-duplicate grouping, rare-class split behavior, isolated training views, dataset fingerprints, audit approval matching, inference threshold resolution, and resumable Colab markers.
 
-## Medical-AI limitations
+## Limitations
 
-The source is a public secondary dataset with uncertain demographics, acquisition devices, clinical sampling, annotation protocol, and patient metadata. The labels mix pathology, treatments, devices, teeth, and anatomy. Some classes are rare, publisher annotations may be inconsistent, and bounding boxes derived from polygons discard lesion shape. There is no external-site, prospective, calibration, robustness, fairness, reader-study, regulatory, or clinical-utility validation.
+The public secondary dataset has uncertain demographics, acquisition hardware, sampling, annotation protocol, and patient metadata. Its taxonomy mixes pathology, treatments, devices, anatomy, and tooth state. Polygon conversion loses shape. Several labels have too little support for stable estimates. There is no external-site, prospective, calibration, fairness, robustness, reader-study, regulatory, or clinical-utility validation.
 
-False negatives can miss disease and false positives can cause unnecessary concern. A qualified dental clinician must review the labels, failure cases, and any intended use before further research or deployment.
+False negatives can miss disease and false positives can create unnecessary concern. All labels and failure cases require qualified dental-clinician review before any further applied research.
 
 ## License
 
-No license is granted for the raw dataset by this repository; the upstream dataset terms apply independently. No separate open-source license has been assigned to this repository unless a `LICENSE` file is added later.
+The upstream dataset's terms apply independently to its files. No separate open-source license is granted by this repository unless a `LICENSE` file is added later.

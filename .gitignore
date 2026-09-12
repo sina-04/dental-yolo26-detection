@@ -24,6 +24,8 @@ dataset/images/
 dataset/labels/
 dataset/runtime/
 dataset/*.cache
+dataset/fingerprint.json
+dataset/.colab_prepared.json
 
 # Downloaded checkpoints and generated training outputs
 yolo26*.pt
@@ -31,6 +33,7 @@ artifacts/
 runs/
 reports/
 colab-results/
+inference_output/
 /FINAL_REPORT.md
 /PROGRESS.md
 

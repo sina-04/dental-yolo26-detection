@@ -16,10 +16,10 @@ import shutil
 import albumentations as A
 import cv2
 import imagehash
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
 import yaml
 
-from src.common import IMAGE_EXTENSIONS, finite_unit, list_images, load_names, opaque_id, sha256_file, write_json
+from src.common import IMAGE_EXTENSIONS, finite_unit, list_images, load_names, opaque_id, sha256_file, stable_fingerprint, write_json
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -27,6 +27,9 @@ OUTPUT_ROOT = PROJECT_ROOT / "dataset"
 REPORT_ROOT = PROJECT_ROOT / "reports"
 SEED = 42
 DATASET_HANDLE = "lokisilvres/dental-disease-panoramic-detection-dataset/versions/6"
+GROUPING_VERSION = "panoramic-filename-phash-v2"
+SPLIT_VERSION = "greedy-multilabel-75-15-10-v2"
+SPLIT_TARGETS = {"train": 0.75, "val": 0.15, "test": 0.10}
 
 
 def dataset_class_count(path: Path) -> int | None:
@@ -242,21 +245,88 @@ def merge_identical_perceptual_groups(records: list[Record]) -> int:
     return changed
 
 
-def near_duplicate_pairs(records: list[Record], max_distance: int = 3, limit: int = 500) -> list[dict[str, object]]:
+def find_near_duplicate_pairs(records: list[Record], max_distance: int = 3) -> list[tuple[Record, Record, int]]:
+    """Find pHash-near images without an O(n²) full scan.
+
+    A 64-bit hash within distance three must share at least one of four
+    16-bit segments. Segment buckets therefore produce a complete candidate
+    set for the configured distance while keeping the full dataset practical.
+    """
+    buckets: dict[tuple[int, int], list[int]] = defaultdict(list)
     hashed = [(record, int(record.phash, 16)) for record in records if record.phash]
-    pairs: list[dict[str, object]] = []
-    for index, (left, left_hash) in enumerate(hashed):
-        for right, right_hash in hashed[index + 1 :]:
+    pairs: list[tuple[Record, Record, int]] = []
+    seen: set[tuple[int, int]] = set()
+    for right_index, (right, right_hash) in enumerate(hashed):
+        candidates: set[int] = set()
+        for segment in range(4):
+            value = (right_hash >> (segment * 16)) & 0xFFFF
+            candidates.update(buckets[(segment, value)])
+        for left_index in candidates:
+            key = (left_index, right_index)
+            if key in seen:
+                continue
+            seen.add(key)
+            left, left_hash = hashed[left_index]
             distance = (left_hash ^ right_hash).bit_count()
             if distance <= max_distance and left.sha256 != right.sha256:
-                pairs.append({"left": left.output_id, "right": right.output_id, "distance": distance, "same_patient_group": left.patient_group == right.patient_group})
-                if len(pairs) >= limit:
-                    return pairs
+                pairs.append((left, right, distance))
+        for segment in range(4):
+            value = (right_hash >> (segment * 16)) & 0xFFFF
+            buckets[(segment, value)].append(right_index)
     return pairs
 
 
-def assign_splits(records: list[Record], class_count: int) -> None:
-    targets = {"train": 0.75, "val": 0.15, "test": 0.10}
+def merge_near_duplicate_groups(records: list[Record], pairs: list[tuple[Record, Record, int]]) -> int:
+    """Transitively place perceptually near images in one split group."""
+    index_by_record = {id(record): index for index, record in enumerate(records)}
+    parent = list(range(len(records)))
+
+    def find(index: int) -> int:
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    def union(left: int, right: int) -> None:
+        left_root, right_root = find(left), find(right)
+        if left_root != right_root:
+            parent[right_root] = left_root
+
+    for left, right, _ in pairs:
+        union(index_by_record[id(left)], index_by_record[id(right)])
+    clusters: dict[int, list[Record]] = defaultdict(list)
+    for index, record in enumerate(records):
+        clusters[find(index)].append(record)
+    changed = 0
+    for cluster in clusters.values():
+        groups = sorted({record.patient_group for record in cluster})
+        if len(groups) <= 1:
+            continue
+        merged = f"panoramic_{opaque_id('|'.join(groups), 20)}"
+        for record in cluster:
+            if record.patient_group != merged:
+                record.patient_group = merged
+                changed += 1
+    return changed
+
+
+def near_duplicate_rows(
+    pairs: list[tuple[Record, Record, int]], limit: int | None = None
+) -> list[dict[str, object]]:
+    selected = pairs if limit is None else pairs[:limit]
+    return [
+        {
+            "left": left.output_id,
+            "right": right.output_id,
+            "distance": distance,
+            "same_patient_group": left.patient_group == right.patient_group,
+        }
+        for left, right, distance in selected
+    ]
+
+
+def assign_splits(records: list[Record], class_count: int) -> dict[str, object]:
+    targets = SPLIT_TARGETS
     grouped: dict[str, list[Record]] = defaultdict(list)
     for record in records:
         grouped[record.patient_group].append(record)
@@ -268,7 +338,23 @@ def assign_splits(records: list[Record], class_count: int) -> None:
         present = {box.class_id for record in group_records for box in record.boxes}
         return sum(1 / max(total_classes[class_id], 1) for class_id in present)
 
-    groups = sorted(grouped.items(), key=lambda item: (-rarity(item[1]), -len(item[1]), item[0]))
+    class_groups: dict[int, set[str]] = {class_id: set() for class_id in range(class_count)}
+    for group, members in grouped.items():
+        for class_id in {box.class_id for record in members for box in record.boxes}:
+            class_groups[class_id].add(group)
+    forced_train_classes = [class_id for class_id, groups in class_groups.items() if 0 < len(groups) < 3]
+    forced_train_groups = set().union(*(class_groups[class_id] for class_id in forced_train_classes)) if forced_train_classes else set()
+    for group in sorted(forced_train_groups):
+        members = grouped[group]
+        for record in members:
+            record.split = "train"
+        state["train"]["images"] += len(members)
+        state["train"]["classes"].update(box.class_id for record in members for box in record.boxes)
+
+    groups = sorted(
+        ((group, members) for group, members in grouped.items() if group not in forced_train_groups),
+        key=lambda item: (-rarity(item[1]), -len(item[1]), item[0]),
+    )
     for group_name, group_records in groups:
         group_classes = Counter(box.class_id for record in group_records for box in record.boxes)
         best_split = "train"
@@ -312,6 +398,8 @@ def assign_splits(records: list[Record], class_count: int) -> None:
                 if donor == missing_split or len(coverage[class_id][donor]) <= 1:
                     continue
                 for group in coverage[class_id][donor]:
+                    if group in forced_train_groups:
+                        continue
                     lost_singletons = sum(len(coverage[other][donor]) == 1 for other in group_classes[group])
                     if lost_singletons == 0:
                         candidates.append((lost_singletons, len(grouped[group]), group, donor))
@@ -323,6 +411,11 @@ def assign_splits(records: list[Record], class_count: int) -> None:
             for other in group_classes[selected_group]:
                 coverage[other][donor].discard(selected_group)
                 coverage[other][missing_split].add(selected_group)
+    return {
+        "class_group_counts": {str(class_id): len(groups) for class_id, groups in class_groups.items()},
+        "forced_train_classes": forced_train_classes,
+        "forced_train_groups": len(forced_train_groups),
+    }
 
 
 def save_box_labels(path: Path, boxes: list[Box]) -> None:
@@ -440,20 +533,70 @@ def augment_training(
     return created
 
 
-def draw_sample(record: Record, names: list[str], output: Path) -> None:
-    with Image.open(record.image).convert("RGB") as image:
+def draw_contact_sheet(records: list[Record], names: list[str], class_id: int, output: Path, seed: int) -> int:
+    candidates = [record for record in records if any(box.class_id == class_id for box in record.boxes)]
+    random.Random(seed + class_id).shuffle(candidates)
+    selected = candidates[:5]
+    if not selected:
+        return 0
+    panels: list[Image.Image] = []
+    for record in selected:
+        with Image.open(record.image).convert("RGB") as opened:
+            image = opened.copy()
         draw = ImageDraw.Draw(image)
-        font = ImageFont.load_default()
         for box in record.boxes:
             x1 = (box.x - box.w / 2) * image.width
             y1 = (box.y - box.h / 2) * image.height
             x2 = (box.x + box.w / 2) * image.width
             y2 = (box.y + box.h / 2) * image.height
-            draw.rectangle((x1, y1, x2, y2), outline=(255, 60, 60), width=max(2, image.width // 500))
-            draw.text((x1 + 2, max(0, y1 - 12)), names[box.class_id], fill=(255, 255, 0), font=font, stroke_width=1, stroke_fill=(0, 0, 0))
-        image.thumbnail((1600, 1000))
-        output.parent.mkdir(parents=True, exist_ok=True)
-        image.save(output, quality=92)
+            color = (255, 60, 60) if box.class_id == class_id else (80, 190, 255)
+            draw.rectangle((x1, y1, x2, y2), outline=color, width=max(2, image.width // 500))
+        image.thumbnail((720, 360))
+        panel = Image.new("RGB", (740, 390), "black")
+        panel.paste(image, ((740 - image.width) // 2, 25))
+        ImageDraw.Draw(panel).text((8, 6), f"{record.output_id} | target: {names[class_id]}", fill="white")
+        panels.append(panel)
+    sheet = Image.new("RGB", (740, 390 * len(panels)), "black")
+    for index, panel in enumerate(panels):
+        sheet.paste(panel, (0, index * 390))
+    output.parent.mkdir(parents=True, exist_ok=True)
+    sheet.save(output, quality=92)
+    return len(selected)
+
+
+def write_training_views(output_root: Path, names: list[str]) -> dict[str, int]:
+    runtime = output_root / "runtime"
+    runtime.mkdir(parents=True, exist_ok=True)
+    train_images = sorted(list_images(output_root / "images" / "train"))
+    base_images = [path for path in train_images if "_aug" not in path.stem]
+    views = {"base": base_images, "augmented": train_images}
+    counts: dict[str, int] = {}
+    for name, images in views.items():
+        train_list = runtime / f"{name}_train.txt"
+        train_list.write_text("\n".join(path.resolve().as_posix() for path in images) + "\n", encoding="utf-8")
+        configuration = {
+            "path": output_root.resolve().as_posix(),
+            "train": train_list.resolve().as_posix(),
+            "val": "images/val",
+            "test": "images/test",
+            "names": {index: class_name for index, class_name in enumerate(names)},
+        }
+        (runtime / f"{name}.yaml").write_text(
+            yaml.safe_dump(configuration, sort_keys=False, allow_unicode=True), encoding="utf-8"
+        )
+        counts[name] = len(images)
+    return counts
+
+
+def native_split_overlap(records: list[Record]) -> dict[str, int]:
+    groups: dict[str, set[str]] = defaultdict(set)
+    for record in records:
+        groups[record.source_split].add(record.patient_group)
+    return {
+        "train_val": len(groups["train"] & groups["val"]),
+        "train_test": len(groups["train"] & groups["test"]),
+        "val_test": len(groups["val"] & groups["test"]),
+    }
 
 
 def write_csv(path: Path, rows: list[dict[str, object]], fieldnames: list[str]) -> None:
@@ -498,12 +641,39 @@ def main() -> None:
         label="Dental X-Ray Panoramic Dataset",
     )
     names = [name.strip() for name in load_names(source_root / "data.yaml")]
-
+    contract = {
+        "dataset_handle": DATASET_HANDLE,
+        "source_data_yaml_sha256": sha256_file(source_root / "data.yaml"),
+        "class_names": names,
+        "grouping_version": GROUPING_VERSION,
+        "split_version": SPLIT_VERSION,
+        "split_targets": SPLIT_TARGETS,
+        "seed": args.seed,
+        "augmentation": {
+            "fraction": args.augment_fraction,
+            "minority_target_instances": args.minority_target_instances,
+            "max_augmentations_per_image": args.max_augmentations_per_image,
+        },
+    }
     panoramic_records, polygon_annotations = collect_source(source_root, len(names))
+    publisher_split_overlap = native_split_overlap(panoramic_records)
     all_records = [record for record in panoramic_records if not any(issue.startswith("corrupt_image") for issue in record.issues)]
     all_records, exact_duplicates = remove_exact_duplicates(all_records)
+    contract["source_content_digest"] = stable_fingerprint([
+        {
+            "sha256": record.sha256,
+            "phash": record.phash,
+            "patient_group_hash": record.patient_group,
+            "publisher_split": record.source_split,
+            "boxes": [box.line() for box in record.boxes],
+        }
+        for record in sorted(all_records, key=lambda item: (item.sha256, item.phash, item.patient_group))
+    ])
+    dataset_fingerprint = stable_fingerprint(contract)
     perceptual_group_merges = merge_identical_perceptual_groups(all_records)
-    assign_splits(all_records, len(names))
+    near_pairs = find_near_duplicate_pairs(all_records)
+    near_group_merges = merge_near_duplicate_groups(all_records, near_pairs)
+    split_metadata = assign_splits(all_records, len(names))
     materialize(all_records, args.output)
     augmented_count = augment_training(
         all_records,
@@ -513,6 +683,7 @@ def main() -> None:
         args.max_augmentations_per_image,
         args.seed,
     )
+    training_view_counts = write_training_views(args.output, names)
 
     data_yaml = {
         "train": "images/train",
@@ -521,11 +692,18 @@ def main() -> None:
         "names": {index: name for index, name in enumerate(names)},
     }
     (args.output / "data.yaml").write_text(yaml.safe_dump(data_yaml, sort_keys=False, allow_unicode=True), encoding="utf-8")
+    write_json(args.output / "fingerprint.json", {"fingerprint": dataset_fingerprint, "contract": contract})
 
+    audit_sample_counts: dict[str, int] = {}
     for class_id in range(len(names)):
-        sample = next((record for record in all_records if any(box.class_id == class_id for box in record.boxes)), None)
-        if sample:
-            draw_sample(sample, names, args.reports_root / "annotation_audit" / f"class_{class_id:02d}_{names[class_id]}.jpg")
+        count = draw_contact_sheet(
+            all_records,
+            names,
+            class_id,
+            args.reports_root / "annotation_audit" / f"class_{class_id:02d}.jpg",
+            args.seed,
+        )
+        audit_sample_counts[str(class_id)] = count
 
     class_rows: list[dict[str, object]] = []
     for class_id, name in enumerate(names):
@@ -555,8 +733,8 @@ def main() -> None:
     } for record in all_records]
     write_csv(args.reports_root / "dataset_manifest.csv", manifest_rows, list(manifest_rows[0]))
 
-    near_pairs = near_duplicate_pairs(all_records)
-    write_csv(args.reports_root / "near_duplicate_candidates.csv", near_pairs, ["left", "right", "distance", "same_patient_group"])
+    near_rows = near_duplicate_rows(near_pairs)
+    write_csv(args.reports_root / "near_duplicate_candidates.csv", near_rows, ["left", "right", "distance", "same_patient_group"])
     write_json(args.reports_root / "exact_duplicates_removed.json", exact_duplicates)
 
     issue_counts = Counter(issue.split(":", 1)[0] for record in all_records for issue in record.issues)
@@ -572,25 +750,42 @@ def main() -> None:
         "dataset_handle": DATASET_HANDLE,
         "dataset_version": 6,
         "license": "Apache 2.0",
+        "dataset_fingerprint": dataset_fingerprint,
+        "dataset_contract": contract,
         "source_counts": dict(source_counts),
+        "publisher_split_group_overlap": publisher_split_overlap,
         "split_counts": dict(split_counts),
         "class_count": len(names),
         "patient_groups": len(patient_splits),
         "patient_group_leakage": patient_leakage,
         "exact_duplicates_removed": len(exact_duplicates),
-        "near_duplicate_candidates": len(near_pairs),
+        "near_duplicate_pairs": len(near_pairs),
+        "near_duplicate_pairs_reported": len(near_rows),
         "records_regrouped_by_identical_perceptual_hash": perceptual_group_merges,
+        "records_regrouped_by_near_duplicate_hash": near_group_merges,
         "polygon_annotations_converted": polygon_annotations,
         "augmented_training_images": augmented_count,
+        "training_view_counts": training_view_counts,
+        "split_metadata": split_metadata,
         "minority_target_instances": args.minority_target_instances,
         "max_augmentations_per_image": args.max_augmentations_per_image,
         "issue_counts": dict(issue_counts),
         "images_after_exact_deduplication": len(all_records),
         "instances": sum(len(record.boxes) for record in all_records),
         "raw_filename_privacy": "Raw panoramic filenames may contain identifying text. Processed filenames and manifests use opaque IDs only.",
-        "manual_audit_status": "Class-stratified visual sheets generated for human/clinical review; automated checks are complete.",
+        "manual_audit_status": "pending",
+        "manual_audit_samples_per_class": audit_sample_counts,
     }
     write_json(args.reports_root / "dataset_audit.json", audit)
+    write_json(
+        args.reports_root / "manual_audit_status.json",
+        {
+            "status": "pending",
+            "dataset_fingerprint": dataset_fingerprint,
+            "instructions": "Review every reports/annotation_audit/class_XX.jpg sheet before approving training.",
+            "samples_per_class": audit_sample_counts,
+        },
+    )
     print(json.dumps(audit, indent=2))
 
 

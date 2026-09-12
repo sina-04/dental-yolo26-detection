@@ -37,11 +37,21 @@ def main() -> None:
     class_rows = [row for row in read_csv(audit_reports / "class_distribution.csv") if row["split"] == "all"]
     per_class = read_csv(reports / "per_class_test_metrics.csv")
     errors = read_csv(reports / "error_analysis.csv")
+    approval_path = audit_reports / "manual_audit_approval.json"
+    approval = read_json(approval_path) if approval_path.exists() else {"status": "missing", "reviewer": "N/A"}
     environment = final["environment"]
-    executed_train_images = final["experiments"][0].get("train_images", audit["split_counts"].get("train", 0))
-    available_train_images = audit["split_counts"].get("train", 0) + audit.get("augmented_training_images", 0)
+    base_available = audit["split_counts"].get("train", 0)
+    augmented_available = audit.get("training_view_counts", {}).get(
+        "augmented", base_available + audit.get("augmented_training_images", 0)
+    )
+    base_experiment = next((item for item in final["experiments"] if item.get("data_variant") == "base"), final["experiments"][0])
+    augmented_experiment = next(
+        (item for item in final["experiments"] if item.get("data_variant") == "augmented"), final["experiments"][-1]
+    )
+    base_executed = base_experiment.get("train_images", base_available)
+    augmented_executed = augmented_experiment.get("train_images", augmented_available)
     model_checkpoint = str(final["experiments"][0].get("model", "YOLO26"))
-    compute_profile = "full-data" if executed_train_images >= available_train_images else "compute-limited"
+    compute_profile = "full-data" if base_executed >= base_available and augmented_executed >= augmented_available else "compute-limited"
     test = final["test_ultralytics_metrics"]
     custom = final["test_threshold_metrics_iou50"]
 
@@ -56,10 +66,10 @@ def main() -> None:
     metric_lines = []
     for row in per_class:
         if int(float(row["support"])) == 0:
-            metric_lines.append(f"| {row['class_id']} | {row['class_name']} | 0 | N/E | N/E | N/E | N/E |")
+            metric_lines.append(f"| {row['class_id']} | {row['class_name']} | 0 | N/E | N/E | N/E | N/E | N/E |")
         else:
             metric_lines.append(
-                f"| {row['class_id']} | {row['class_name']} | {row['support']} | {float(row['precision']):.3f} | {float(row['recall']):.3f} | {float(row['f1']):.3f} | {float(row['map50_95']):.3f} |"
+                f"| {row['class_id']} | {row['class_name']} | {row['support']} | {row.get('evidence_tier', 'N/E')} | {float(row['precision']):.3f} | {float(row['recall']):.3f} | {float(row['f1']):.3f} | {float(row['map50_95']):.3f} |"
             )
     metric_table = "\n".join(metric_lines)
     error_table = "\n".join(
@@ -75,9 +85,9 @@ This project uses only the 31-class Dental X-Ray Panoramic Dataset to build a YO
 
 The selected model is **{final['selected_experiment']}**, chosen only by validation mAP50-95. Its held-out test mAP50-95 is **{test.get('metrics/mAP50-95(B)', 0.0):.4f}**, mAP50 is **{test.get('metrics/mAP50(B)', 0.0):.4f}**, precision is **{test.get('metrics/precision(B)', 0.0):.4f}**, and recall is **{test.get('metrics/recall(B)', 0.0):.4f}**. At the validation-selected confidence threshold of **{final['validation_selected_threshold']:.2f}**, the custom IoU=0.50 test F1 is **{custom['f1']:.4f}**.
 
-The executed **{compute_profile}** profile used **{executed_train_images:,} of {available_train_images:,} available training images**. Validation and test sets remained complete. Hardware and software details are recorded below so local and Colab runs can be compared without conflating their compute budgets.
+The executed **{compute_profile}** profile used **{base_executed:,}/{base_available:,} baseline-view images** and **{augmented_executed:,}/{augmented_available:,} augmented-view images**. Validation and test sets remained complete. Hardware and software details are recorded below so local and Colab runs can be compared without conflating their compute budgets.
 
-The result is **not clinically usable**: at the validation-selected 0.05 threshold it missed **{custom['fn']:,} of {custom['tp'] + custom['fn']:,}** labeled test objects (recall {custom['recall']:.4f}). The high aggregate precision must not be read in isolation; the model is severely recall-limited after this short local training profile.
+The result is **not clinically usable**: at the validation-selected threshold it missed **{custom['fn']:,} of {custom['tp'] + custom['fn']:,}** labeled test objects (recall {custom['recall']:.4f}). Aggregate metrics must not be read in isolation, especially for classes with very limited test support.
 
 This is an educational research result, not a clinically validated diagnostic device.
 
@@ -96,6 +106,8 @@ The panoramic export contains 31 classes spanning diseases, treatments, devices,
 - Segmentation polygons converted to boxes: **{audit.get('polygon_annotations_converted', 0)}**.
 - Patient-group leakage count: **{audit.get('patient_group_leakage', 0)}**.
 - Offline medically mild AlbumentationsX training images: **{audit.get('augmented_training_images', 0)}**.
+- Dataset fingerprint: **`{audit.get('dataset_fingerprint', 'missing')}`**.
+- Manual contact-sheet audit: **{approval.get('status', 'missing')}**, reviewer **{approval.get('reviewer', 'N/A')}**.
 - Coordinate/annotation issues: `{audit.get('issue_counts', {})}`.
 
 Automatic QC checked image decodability, missing/malformed labels, class ranges, coordinate ranges, non-positive and tiny boxes, exact hashes, perceptual-hash near-duplicate candidates, source pairing, and split leakage. One annotated sample per observed class is generated locally in `reports/annotation_audit/`. Those clinical-image derivatives are excluded from the public Git repository pending explicit privacy and redistribution review. The montages support local review but do not substitute for a dentist/radiologist annotation audit.
@@ -146,11 +158,11 @@ The held-out test set was evaluated once after experiment selection. Ultralytics
 
 ### Per-class test metrics
 
-| ID | Class | Test support | Precision | Recall | F1 | mAP50-95 |
-|---:|---|---:|---:|---:|---:|---:|
+| ID | Class | Test support | Evidence tier | Precision | Recall | F1 | mAP50-95 |
+|---:|---|---:|---|---:|---:|---:|---:|
 {metric_table}
 
-`N/E` means not estimable because the held-out test split contains no ground-truth instance of that ultra-rare class; it is not a zero-performance claim.
+`N/E` means not estimable because the held-out test split contains no ground-truth instance of that ultra-rare class; it is not a zero-performance claim. `very_low` (<20 objects) and `limited` (<50 objects) results are exploratory rather than reliable class-level estimates.
 
 The confusion matrix and training/validation loss plots are retained under `runs/`; `reports/threshold_analysis.png` shows the validation precision-recall-F1 operating-point tradeoff.
 
@@ -178,6 +190,10 @@ Recurring risks include small lesions, low contrast, overlapping anatomy, severe
 
 Dropout was not claimed or used as a detector regularizer.
 
+## Legacy reference comparison
+
+The upstream Dental-Disease-Detection application demonstrates that the same 31-label domain can support immediate multiclass inference with separately distributed weights. Safe checkpoint metadata inspection identifies that model as an Ultralytics **YOLOv8x-seg** segmentation model (Ultralytics 8.3.0), not YOLO26. Its embedded validation summary reports box mAP50 **0.2971**, box mAP50-95 **0.1567**, and mask mAP50-95 **0.1160**. These figures are contextual only: the repository does not contain its training code or split construction, and the publisher's native split has substantial inferred patient/exam overlap. It is therefore not treated as a reproducible benchmark or directly compared for model selection.
+
 ## Limitations and medical-AI warning
 
 The source is a public secondary dataset with uncertain clinical sampling, demographics, device distributions, labeling protocol, and patient metadata. Its taxonomy mixes anatomy, disease, treatments, and devices. Bounding boxes derived from segmentation discard lesion shape. Some classes may be too rare to estimate stable performance, and high aggregate mAP can hide clinically important minority-class failure. Patient grouping is inferred, not externally verified. There is no external-site, prospective, reader-study, calibration, robustness, fairness, security, regulatory, or clinical-utility validation.
@@ -188,7 +204,9 @@ False negatives could miss disease; false positives could trigger unnecessary co
 
 - `src/prepare_dataset.py`: validation, conversion, grouping, splitting, augmentation, and audit
 - `src/train_evaluate.py`: transfer learning, experiment selection, final test evaluation, threshold analysis, inference, and error analysis
+- `src/infer.py`: validation-thresholded prediction CLI with annotated images and JSON detections
 - `dataset/data.yaml`: portable generated-dataset configuration and 31-class ontology
+- `dataset/fingerprint.json`: immutable data/preparation contract identifier
 - `reports/dataset_manifest.csv`: privacy-hashed split manifest
 - `reports/dataset_audit.json`: QC summary
 - `reports/experiments.csv`: experiment ledger

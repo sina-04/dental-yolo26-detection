@@ -26,6 +26,17 @@ def main() -> None:
     configuration = yaml.safe_load((dataset / "data.yaml").read_text(encoding="utf-8"))
     class_count = len(configuration["names"])
     failures: list[str] = []
+    if class_count != 31:
+        failures.append(f"expected 31 classes, found {class_count}")
+    fingerprint_path = dataset / "fingerprint.json"
+    dataset_fingerprint = ""
+    if not fingerprint_path.exists():
+        failures.append("dataset/fingerprint.json is missing")
+    else:
+        try:
+            dataset_fingerprint = str(json.loads(fingerprint_path.read_text(encoding="utf-8"))["fingerprint"])
+        except (json.JSONDecodeError, KeyError, OSError):
+            failures.append("dataset/fingerprint.json is invalid")
     counts: dict[str, dict[str, int]] = {}
     for split in ("train", "val", "test"):
         image_stems = {path.stem for path in (dataset / "images" / split).iterdir() if path.suffix.lower() in IMAGE_EXTENSIONS}
@@ -49,6 +60,32 @@ def main() -> None:
                 instances += 1
         counts[split] = {"images": len(image_stems), "labels": len(label_stems), "instances": instances}
 
+    runtime = dataset / "runtime"
+    view_stems: dict[str, set[str]] = {}
+    for view in ("base", "augmented"):
+        path = runtime / f"{view}_train.txt"
+        if not path.exists():
+            failures.append(f"runtime/{view}_train.txt is missing")
+            view_stems[view] = set()
+            continue
+        listed = [Path(line.strip()) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        missing = [str(path) for path in listed if not path.exists()]
+        if missing:
+            failures.append(f"runtime/{view}_train.txt lists {len(missing)} missing images")
+        view_stems[view] = {path.stem for path in listed}
+    if any("_aug" in stem for stem in view_stems.get("base", set())):
+        failures.append("base training view contains augmented images")
+    if not view_stems.get("base", set()).issubset(view_stems.get("augmented", set())):
+        failures.append("augmented training view is not a superset of the base view")
+    generated_train_stems = {
+        path.stem for path in (dataset / "images" / "train").iterdir() if path.suffix.lower() in IMAGE_EXTENSIONS
+    }
+    if view_stems.get("augmented", set()) != generated_train_stems:
+        failures.append("augmented training view does not exactly match generated training images")
+    for split in ("val", "test"):
+        if any("_aug" in path.stem for path in (dataset / "images" / split).iterdir() if path.suffix.lower() in IMAGE_EXTENSIONS):
+            failures.append(f"{split}: augmented images are forbidden")
+
     manifest = list(csv.DictReader((reports / "dataset_manifest.csv").open(encoding="utf-8")))
     by_patient: dict[str, set[str]] = defaultdict(set)
     by_hash: dict[str, set[str]] = defaultdict(set)
@@ -67,10 +104,15 @@ def main() -> None:
         failures.append(f"{exact_hash_leakage} exact hashes cross splits")
     if near_leakage:
         failures.append(f"{near_leakage} listed near-duplicate pairs cross splits")
+    audit = json.loads((reports / "dataset_audit.json").read_text(encoding="utf-8"))
+    if dataset_fingerprint and audit.get("dataset_fingerprint") != dataset_fingerprint:
+        failures.append("dataset fingerprint does not match dataset audit")
     payload = {
         "status": "pass" if not failures else "fail",
         "counts": counts,
         "class_count": class_count,
+        "dataset_fingerprint": dataset_fingerprint,
+        "training_view_counts": {name: len(stems) for name, stems in view_stems.items()},
         "patient_group_cross_split": patient_leakage,
         "exact_hash_cross_split": exact_hash_leakage,
         "listed_near_duplicate_cross_split": near_leakage,

@@ -1,19 +1,27 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import tempfile
 import unittest
 
-from src.colab_workflow import build_parser, download_dataset, prepared_dataset_is_valid
+from src.colab_workflow import audit_is_approved, build_parser, download_dataset, prepared_dataset_is_valid
+from src.common import stable_fingerprint
+from src.infer import resolve_confidence
 from src.prepare_dataset import (
     Box,
     Record,
+    assign_splits,
     augmentation_copy_plan,
     build_augmentation,
+    find_near_duplicate_pairs,
+    merge_near_duplicate_groups,
     parse_label,
     patient_key,
     resolve_dataset_root,
+    write_training_views,
 )
+from src.train_evaluate import require_audit_approval, support_tier
 
 
 class PipelineTests(unittest.TestCase):
@@ -60,12 +68,9 @@ class PipelineTests(unittest.TestCase):
 
     def test_colab_profile_defaults_to_full_data_yolo26s(self) -> None:
         args = build_parser().parse_args([])
-        self.assertEqual("yolo26s.pt", args.model)
-        self.assertIsNone(getattr(args, "max_train_images", None))
-        self.assertEqual(640, args.imgsz)
-        self.assertEqual(32, args.batch)
-        self.assertEqual(100, args.tuned_epochs)
-        self.assertEqual(20, args.patience)
+        self.assertEqual("colab_t4.yaml", args.profile.name)
+        self.assertIn("panoramic31-yolo26s-t4-v1", str(args.results_root))
+        self.assertEqual("prepare", args.stage)
         self.assertEqual(128, args.minority_target_instances)
 
     def test_class_aware_augmentation_caps_rare_patient_reuse(self) -> None:
@@ -93,12 +98,85 @@ class PipelineTests(unittest.TestCase):
             dataset = root / "dataset"
             reports = root / "reports"
             (dataset / "images" / "train").mkdir(parents=True)
+            (dataset / "runtime").mkdir()
+            (dataset / "runtime" / "base.yaml").write_text("names: []\n", encoding="utf-8")
             reports.mkdir()
             (reports / "dataset_verification.json").write_text('{"status":"pass"}', encoding="utf-8")
+            (dataset / "fingerprint.json").write_text('{"fingerprint":"abc"}', encoding="utf-8")
             self.assertFalse(prepared_dataset_is_valid(dataset, reports))
-            (dataset / ".colab_prepared.json").write_text("{}", encoding="utf-8")
+            (dataset / ".colab_prepared.json").write_text('{"dataset_fingerprint":"abc"}', encoding="utf-8")
             self.assertTrue(prepared_dataset_is_valid(dataset, reports))
             self.assertFalse(prepared_dataset_is_valid(dataset, reports, {"minority_target_instances": 128}))
+
+    def test_dataset_fingerprint_is_order_stable_and_sensitive(self) -> None:
+        self.assertEqual(stable_fingerprint({"a": 1, "b": 2}), stable_fingerprint({"b": 2, "a": 1}))
+        self.assertNotEqual(stable_fingerprint({"a": 1}), stable_fingerprint({"a": 2}))
+
+    def test_near_duplicates_are_transitively_grouped(self) -> None:
+        records = [
+            Record("panoramic", "train", Path(f"{index}.jpg"), None, f"p{index}", phash=value, sha256=str(index))
+            for index, value in enumerate(("0000000000000000", "0000000000000001", "0000000000000003"))
+        ]
+        pairs = find_near_duplicate_pairs(records, max_distance=1)
+        merge_near_duplicate_groups(records, pairs)
+        self.assertEqual(2, len(pairs))
+        self.assertEqual(1, len({record.patient_group for record in records}))
+
+    def test_ultra_rare_class_is_forced_to_training(self) -> None:
+        records = [
+            Record("panoramic", "train", Path("rare.jpg"), None, "rare_group", [Box(0, 0.5, 0.5, 0.1, 0.1)]),
+            Record("panoramic", "train", Path("common1.jpg"), None, "common_1", [Box(1, 0.5, 0.5, 0.1, 0.1)]),
+            Record("panoramic", "train", Path("common2.jpg"), None, "common_2", [Box(1, 0.5, 0.5, 0.1, 0.1)]),
+            Record("panoramic", "train", Path("common3.jpg"), None, "common_3", [Box(1, 0.5, 0.5, 0.1, 0.1)]),
+        ]
+        metadata = assign_splits(records, class_count=2)
+        self.assertEqual("train", records[0].split)
+        self.assertIn(0, metadata["forced_train_classes"])
+
+    def test_training_views_isolate_augmented_images(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            dataset = Path(directory)
+            train = dataset / "images" / "train"
+            train.mkdir(parents=True)
+            (train / "base.jpg").write_bytes(b"base")
+            (train / "base_aug01.jpg").write_bytes(b"aug")
+            counts = write_training_views(dataset, [f"class_{index}" for index in range(31)])
+            base = (dataset / "runtime" / "base_train.txt").read_text(encoding="utf-8")
+            augmented = (dataset / "runtime" / "augmented_train.txt").read_text(encoding="utf-8")
+        self.assertEqual({"base": 1, "augmented": 2}, counts)
+        self.assertNotIn("_aug", base)
+        self.assertIn("_aug", augmented)
+
+    def test_audit_approval_must_match_dataset_fingerprint(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            dataset, reports, results = root / "dataset", root / "reports", root / "results"
+            dataset.mkdir()
+            reports.mkdir()
+            (results / "reports").mkdir(parents=True)
+            (dataset / "fingerprint.json").write_text('{"fingerprint":"current"}', encoding="utf-8")
+            approval = {"status": "approved", "dataset_fingerprint": "stale"}
+            (reports / "manual_audit_approval.json").write_text(json.dumps(approval), encoding="utf-8")
+            self.assertFalse(audit_is_approved(dataset, reports, results))
+            approval["dataset_fingerprint"] = "current"
+            (reports / "manual_audit_approval.json").write_text(json.dumps(approval), encoding="utf-8")
+            self.assertTrue(audit_is_approved(dataset, reports, results))
+            self.assertEqual("approved", require_audit_approval(reports / "manual_audit_approval.json", "current")["status"])
+            with self.assertRaises(RuntimeError):
+                require_audit_approval(reports / "manual_audit_approval.json", "different")
+
+    def test_inference_threshold_uses_validation_selection(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            metrics = Path(directory) / "final_metrics.json"
+            metrics.write_text('{"validation_selected_threshold":0.35}', encoding="utf-8")
+            self.assertEqual(0.35, resolve_confidence(None, metrics))
+            self.assertEqual(0.5, resolve_confidence(0.5, metrics))
+
+    def test_support_tiers_are_explicit(self) -> None:
+        self.assertEqual("N/E", support_tier(0))
+        self.assertEqual("very_low", support_tier(3))
+        self.assertEqual("limited", support_tier(20))
+        self.assertEqual("supported", support_tier(50))
 
     def test_colab_download_marker_does_not_conflict_with_kagglehub_directory(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
