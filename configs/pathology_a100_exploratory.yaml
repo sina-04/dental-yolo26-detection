@@ -1,0 +1,57 @@
+# Same modeling design as the strict profile, but explicitly permits the
+# under-supported public dataset for research ablations. Results from this
+# profile must not be presented as satisfying the v2 acceptance gate.
+data_view: views/pathology
+model: yolo26m.pt
+baseline_epochs: 120
+tuned_epochs: 120
+imgsz: 1024
+batch: 16
+workers: 4
+patience: 30
+cache: disk
+amp: true
+seed: 42
+run_prefix: pathology6_a100_exploratory_v2
+save_period: 1
+require_primary_support: true
+require_clinician_review: false
+allow_insufficient_support: true
+bootstrap_samples: 2000
+minimum_precision: 0.60
+tile_inference:
+  enabled: true
+  aspect_ratio_trigger: 1.4
+  tiles: 3
+  overlap: 0.25
+  merge_iou: 0.55
+experiments:
+  - name: e0_yolo26s_640
+    model: yolo26s.pt
+    imgsz: 640
+    batch: 32
+    epochs: 120
+    data_variant: base
+  - name: e1_yolo26s_1024
+    model: yolo26s.pt
+    imgsz: 1024
+    batch: 24
+    epochs: 120
+    data_variant: base
+  - name: e2_yolo26m_1024
+    model: yolo26m.pt
+    imgsz: 1024
+    batch: 16
+    epochs: 120
+    data_variant: base
+  - name: e3_yolo26m_1024_balanced
+    model: yolo26m.pt
+    imgsz: 1024
+    batch: 16
+    epochs: 120
+    data_variant: balanced
+    training:
+      cls: 1.0
+      box: 8.0
+      dfl: 1.75
+      warmup_epochs: 4.0

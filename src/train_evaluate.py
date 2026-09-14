@@ -23,6 +23,8 @@ from ultralytics import YOLO, __version__ as ultralytics_version
 import yaml
 
 from src.common import IMAGE_EXTENSIONS, load_names, sha256_file, stable_fingerprint, write_json
+from src.inference_utils import merge_detections, tile_windows
+from src.pathology import PRIMARY_SOURCE_CLASSES, require_clinician_review, require_support_gate
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -133,6 +135,7 @@ def train_experiment(
     data_variant: str,
     dataset_fingerprint: str,
     code_commit: str,
+    training_overrides: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     run_dir = RUNS / name
     existing_last = run_dir / "weights" / "last.pt"
@@ -179,6 +182,11 @@ def train_experiment(
         "exist_ok": True,
         "verbose": True,
     }
+    protected = {"data", "project", "name", "exist_ok", "device"}
+    forbidden = protected.intersection(training_overrides or {})
+    if forbidden:
+        raise ValueError(f"Training overrides cannot replace protected keys: {sorted(forbidden)}")
+    parameters.update(training_overrides or {})
     manifest = {
         "schema_version": 1,
         "experiment": name,
@@ -207,15 +215,21 @@ def train_experiment(
 
     checkpoint = str(existing_last) if resume and existing_last.exists() and not already_complete else model_checkpoint
     model = YOLO(checkpoint)
+    trainer_class = None
+    if data_variant == "balanced":
+        from src.balanced_trainer import PatientBalancedDetectionTrainer, configure_patient_groups
+
+        configure_patient_groups(REPORTS / "dataset_manifest.csv", seed)
+        trainer_class = PatientBalancedDetectionTrainer
     started = time.monotonic()
     if already_complete:
         print(f"Skipping completed experiment {name}: {completed_before}/{epochs} epochs already present.", flush=True)
         model = YOLO(str(run_dir / "weights" / "best.pt"))
     elif resume and existing_last.exists():
         print(f"Resuming {name} from {existing_last}", flush=True)
-        model.train(resume=True, epochs=epochs)
+        model.train(resume=True, epochs=epochs, **({"trainer": trainer_class} if trainer_class else {}))
     else:
-        model.train(**parameters)
+        model.train(**parameters, **({"trainer": trainer_class} if trainer_class else {}))
     duration = time.monotonic() - started
     save_dir = run_dir if already_complete else Path(model.trainer.save_dir)
     best = save_dir / "weights" / "best.pt"
@@ -286,11 +300,56 @@ def iou(left: tuple[float, float, float, float], right: tuple[float, float, floa
     return intersection / max(left_area + right_area - intersection, 1e-12)
 
 
-def cache_predictions(model: YOLO, split: str, imgsz: int, device: str) -> dict[str, list[Prediction]]:
+def cache_predictions(
+    model: YOLO,
+    split: str,
+    imgsz: int,
+    device: str,
+    tile_config: dict[str, Any] | None = None,
+) -> dict[str, list[Prediction]]:
     image_dir = DATA_YAML.parent / "images" / split
     predictions: dict[str, list[Prediction]] = {}
     # The operating-point search starts at 0.05, so retaining lower-confidence
     # detections only increases memory and matching cost without affecting it.
+    if tile_config and tile_config.get("enabled"):
+        for image_path in sorted(path for path in image_dir.iterdir() if path.suffix.lower() in IMAGE_EXTENSIONS):
+            image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+            if image is None:
+                continue
+            height, width = image.shape[:2]
+            raw: list[dict[str, Any]] = []
+
+            def add_result(result: Any, x_offset: int, source_view: str) -> None:
+                if result.boxes is None:
+                    return
+                for box in result.boxes:
+                    coordinates = [float(value) for value in box.xyxy[0].tolist()]
+                    coordinates[0] += x_offset
+                    coordinates[2] += x_offset
+                    raw.append({
+                        "class_id": int(box.cls.item()), "confidence": float(box.conf.item()),
+                        "xyxy": coordinates, "source_view": source_view,
+                    })
+
+            add_result(model.predict(image, conf=0.05, iou=0.7, imgsz=imgsz, device=device, verbose=False)[0], 0, "full")
+            if width / max(height, 1) > float(tile_config.get("aspect_ratio_trigger", 1.4)):
+                for index, (x1, y1, x2, y2) in enumerate(tile_windows(
+                    width, height, int(tile_config.get("tiles", 3)), float(tile_config.get("overlap", 0.25))
+                ), start=1):
+                    add_result(
+                        model.predict(image[y1:y2, x1:x2], conf=0.05, iou=0.7, imgsz=imgsz, device=device, verbose=False)[0],
+                        x1, f"tile_{index}",
+                    )
+            entries = []
+            for item in merge_detections(raw, float(tile_config.get("merge_iou", 0.55))):
+                x1, y1, x2, y2 = item["xyxy"]
+                entries.append(Prediction(
+                    int(item["class_id"]), float(item["confidence"]),
+                    (x1 / width, y1 / height, x2 / width, y2 / height),
+                ))
+            predictions[image_path.stem] = entries
+        return predictions
+
     results = model.predict(source=str(image_dir), conf=0.05, iou=0.7, imgsz=imgsz, device=device, stream=True, verbose=False)
     for result in results:
         entries: list[Prediction] = []
@@ -304,8 +363,17 @@ def cache_predictions(model: YOLO, split: str, imgsz: int, device: str) -> dict[
     return predictions
 
 
-def score_image(truths: list[GroundTruth], predictions: list[Prediction], threshold: float) -> dict[str, Any]:
-    active = [prediction for prediction in predictions if prediction.confidence >= threshold]
+def _prediction_threshold(threshold: float | dict[int, float], class_id: int) -> float:
+    return float(threshold.get(class_id, 1.0)) if isinstance(threshold, dict) else float(threshold)
+
+
+def score_image(
+    truths: list[GroundTruth], predictions: list[Prediction], threshold: float | dict[int, float]
+) -> dict[str, Any]:
+    active = [
+        prediction for prediction in predictions
+        if prediction.confidence >= _prediction_threshold(threshold, prediction.class_id)
+    ]
     matched_truths: set[int] = set()
     matched_predictions: set[int] = set()
     tp = misclassified = poor_localization = 0
@@ -358,11 +426,12 @@ def score_image(truths: list[GroundTruth], predictions: list[Prediction], thresh
 def threshold_analysis(predictions: dict[str, list[Prediction]], split: str, thresholds: list[float]) -> tuple[list[dict[str, float]], float]:
     image_dir = DATA_YAML.parent / "images" / split
     images = sorted(path for path in image_dir.iterdir() if path.suffix.lower() in IMAGE_EXTENSIONS)
+    truth_cache = {image.stem: load_ground_truth(image) for image in images}
     rows: list[dict[str, float]] = []
     for threshold in thresholds:
         totals = Counter()
         for image in images:
-            totals.update({key: value for key, value in score_image(load_ground_truth(image), predictions.get(image.stem, []), threshold).items() if isinstance(value, int)})
+            totals.update({key: value for key, value in score_image(truth_cache[image.stem], predictions.get(image.stem, []), threshold).items() if isinstance(value, int)})
         precision = totals["tp"] / max(totals["tp"] + totals["fp"], 1)
         recall = totals["tp"] / max(totals["tp"] + totals["fn"], 1)
         f1 = 2 * precision * recall / max(precision + recall, 1e-12)
@@ -372,7 +441,44 @@ def threshold_analysis(predictions: dict[str, list[Prediction]], split: str, thr
     return rows, float(selected["threshold"])
 
 
-def aggregate_custom_metrics(predictions: dict[str, list[Prediction]], split: str, threshold: float, class_count: int) -> tuple[dict[str, float], list[dict[str, Any]], list[dict[str, Any]]]:
+def per_class_threshold_analysis(
+    predictions: dict[str, list[Prediction]],
+    split: str,
+    thresholds: list[float],
+    class_count: int,
+    minimum_precision: float = 0.60,
+) -> tuple[list[dict[str, float]], dict[int, float]]:
+    """Select recall-oriented F2 thresholds using validation data only."""
+    image_dir = DATA_YAML.parent / "images" / split
+    images = sorted(path for path in image_dir.iterdir() if path.suffix.lower() in IMAGE_EXTENSIONS)
+    truth_cache = {image.stem: load_ground_truth(image) for image in images}
+    rows: list[dict[str, float]] = []
+    selected: dict[int, float] = {}
+    for class_id in range(class_count):
+        candidates: list[dict[str, float]] = []
+        for threshold in thresholds:
+            totals = Counter()
+            for image in images:
+                truths = [truth for truth in truth_cache[image.stem] if truth.class_id == class_id]
+                class_predictions = [item for item in predictions.get(image.stem, []) if item.class_id == class_id]
+                scored = score_image(truths, class_predictions, threshold)
+                totals.update({key: value for key, value in scored.items() if isinstance(value, int)})
+            precision = totals["tp"] / max(totals["tp"] + totals["fp"], 1)
+            recall = totals["tp"] / max(totals["tp"] + totals["fn"], 1)
+            f2 = 5 * precision * recall / max(4 * precision + recall, 1e-12)
+            row = {
+                "class_id": class_id, "threshold": threshold, "precision": precision,
+                "recall": recall, "f2": f2, "tp": totals["tp"], "fp": totals["fp"], "fn": totals["fn"],
+            }
+            rows.append(row)
+            candidates.append(row)
+        eligible = [row for row in candidates if row["precision"] >= minimum_precision]
+        winner = max(eligible or candidates, key=lambda row: (row["f2"], row["recall"], -row["threshold"]))
+        selected[class_id] = float(winner["threshold"])
+    return rows, selected
+
+
+def aggregate_custom_metrics(predictions: dict[str, list[Prediction]], split: str, threshold: float | dict[int, float], class_count: int) -> tuple[dict[str, float], list[dict[str, Any]], list[dict[str, Any]]]:
     totals = Counter()
     per_class: dict[int, Counter[str]] = defaultdict(Counter)
     per_image: list[dict[str, Any]] = []
@@ -382,7 +488,12 @@ def aggregate_custom_metrics(predictions: dict[str, list[Prediction]], split: st
         totals.update({key: value for key, value in scored.items() if isinstance(value, int)})
         for class_id, counts in scored["per_class"].items():
             per_class[class_id].update(counts)
-        per_image.append({"image_id": image.stem, **{key: value for key, value in scored.items() if isinstance(value, int)}})
+        row: dict[str, Any] = {"image_id": image.stem, **{key: value for key, value in scored.items() if isinstance(value, int)}}
+        for class_id in range(class_count):
+            counts = scored["per_class"][class_id]
+            for key in ("tp", "fp", "fn"):
+                row[f"class_{class_id}_{key}"] = counts[key]
+        per_image.append(row)
     precision = totals["tp"] / max(totals["tp"] + totals["fp"], 1)
     recall = totals["tp"] / max(totals["tp"] + totals["fn"], 1)
     summary = {"threshold": threshold, "precision": precision, "recall": recall, "f1": 2 * precision * recall / max(precision + recall, 1e-12), **totals}
@@ -395,7 +506,118 @@ def aggregate_custom_metrics(predictions: dict[str, list[Prediction]], split: st
     return summary, class_rows, per_image
 
 
-def render_examples(model_predictions: dict[str, list[Prediction]], per_image: list[dict[str, Any]], threshold: float, names: list[str], count: int = 10) -> list[dict[str, Any]]:
+def bootstrap_operating_metrics(
+    per_image: list[dict[str, Any]],
+    manifest_path: Path,
+    class_count: int,
+    samples: int,
+    seed: int,
+) -> dict[str, dict[str, float]]:
+    """Patient-level bootstrap intervals for macro operating-point metrics."""
+    with manifest_path.open(encoding="utf-8", newline="") as handle:
+        group_by_image = {row["image_id"]: row["patient_group_hash"] for row in csv.DictReader(handle)}
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in per_image:
+        grouped[group_by_image.get(str(row["image_id"]), str(row["image_id"]))].append(row)
+    groups = sorted(grouped)
+    if not groups or samples <= 0:
+        return {}
+    rng = random.Random(seed)
+    distributions: dict[str, list[float]] = defaultdict(list)
+    for _ in range(samples):
+        drawn = [rng.choice(groups) for _ in groups]
+        class_metrics: dict[str, list[float]] = defaultdict(list)
+        for class_id in range(class_count):
+            totals = Counter()
+            for group in drawn:
+                for row in grouped[group]:
+                    for key in ("tp", "fp", "fn"):
+                        totals[key] += int(row.get(f"class_{class_id}_{key}", 0))
+            precision = totals["tp"] / max(totals["tp"] + totals["fp"], 1)
+            recall = totals["tp"] / max(totals["tp"] + totals["fn"], 1)
+            if totals["tp"] + totals["fn"]:
+                class_metrics["precision"].append(precision)
+                class_metrics["recall"].append(recall)
+                class_metrics["f1"].append(2 * precision * recall / max(precision + recall, 1e-12))
+        for key, values in class_metrics.items():
+            distributions[f"macro_{key}"].append(float(np.mean(values)) if values else 0.0)
+    intervals: dict[str, dict[str, float]] = {}
+    for name, values in distributions.items():
+        intervals[name] = {
+            "lower_95": float(np.percentile(values, 2.5)),
+            "median": float(np.percentile(values, 50.0)),
+            "upper_95": float(np.percentile(values, 97.5)),
+        }
+    return intervals
+
+
+def macro_operating_metrics(class_rows: list[dict[str, Any]]) -> dict[str, float]:
+    supported = [row for row in class_rows if int(row.get("support", 0)) > 0]
+    if not supported:
+        return {"precision": 0.0, "recall": 0.0, "f1": 0.0}
+    return {
+        key: float(np.mean([float(row[key]) for row in supported]))
+        for key in ("precision", "recall", "f1")
+    }
+
+
+def paired_bootstrap_delta(
+    candidate: list[dict[str, Any]],
+    baseline: list[dict[str, Any]],
+    manifest_path: Path,
+    class_count: int,
+    samples: int,
+    seed: int,
+) -> dict[str, dict[str, float]]:
+    """Paired patient-level bootstrap of candidate-minus-baseline macro metrics."""
+    with manifest_path.open(encoding="utf-8", newline="") as handle:
+        group_by_image = {row["image_id"]: row["patient_group_hash"] for row in csv.DictReader(handle)}
+    candidate_by_id = {str(row["image_id"]): row for row in candidate}
+    baseline_by_id = {str(row["image_id"]): row for row in baseline}
+    groups: dict[str, list[str]] = defaultdict(list)
+    for image_id in sorted(set(candidate_by_id) & set(baseline_by_id)):
+        groups[group_by_image.get(image_id, image_id)].append(image_id)
+    group_ids = sorted(groups)
+    if not group_ids or samples <= 0:
+        return {}
+    rng = random.Random(seed)
+    distributions: dict[str, list[float]] = defaultdict(list)
+
+    def sampled_macro(rows: dict[str, dict[str, Any]], drawn: list[str]) -> dict[str, float]:
+        metrics: dict[str, list[float]] = defaultdict(list)
+        for class_id in range(class_count):
+            totals = Counter()
+            for group in drawn:
+                for image_id in groups[group]:
+                    row = rows[image_id]
+                    for key in ("tp", "fp", "fn"):
+                        totals[key] += int(row.get(f"class_{class_id}_{key}", 0))
+            if totals["tp"] + totals["fn"] == 0:
+                continue
+            precision = totals["tp"] / max(totals["tp"] + totals["fp"], 1)
+            recall = totals["tp"] / max(totals["tp"] + totals["fn"], 1)
+            metrics["precision"].append(precision)
+            metrics["recall"].append(recall)
+            metrics["f1"].append(2 * precision * recall / max(precision + recall, 1e-12))
+        return {key: float(np.mean(values)) if values else 0.0 for key, values in metrics.items()}
+
+    for _ in range(samples):
+        drawn = [rng.choice(group_ids) for _ in group_ids]
+        candidate_metrics = sampled_macro(candidate_by_id, drawn)
+        baseline_metrics = sampled_macro(baseline_by_id, drawn)
+        for key in ("precision", "recall", "f1"):
+            distributions[f"macro_{key}"].append(candidate_metrics.get(key, 0.0) - baseline_metrics.get(key, 0.0))
+    return {
+        name: {
+            "lower_95": float(np.percentile(values, 2.5)),
+            "median": float(np.percentile(values, 50.0)),
+            "upper_95": float(np.percentile(values, 97.5)),
+        }
+        for name, values in distributions.items()
+    }
+
+
+def render_examples(model_predictions: dict[str, list[Prediction]], per_image: list[dict[str, Any]], threshold: float | dict[int, float], names: list[str], count: int = 10) -> list[dict[str, Any]]:
     image_dir = DATA_YAML.parent / "images" / "test"
     ranked = sorted(per_image, key=lambda row: (-(row["fn"] + row["fp"] + row["misclassification"] + row["poor_localization"]), row["image_id"]))
     selectors = [
@@ -429,7 +651,10 @@ def render_examples(model_predictions: dict[str, list[Prediction]], per_image: l
             continue
         height, width = image.shape[:2]
         truths = load_ground_truth(image_path)
-        active_predictions = [prediction for prediction in model_predictions.get(row["image_id"], []) if prediction.confidence >= threshold]
+        active_predictions = [
+            prediction for prediction in model_predictions.get(row["image_id"], [])
+            if prediction.confidence >= _prediction_threshold(threshold, prediction.class_id)
+        ]
         for truth in truths:
             x1, y1, x2, y2 = truth.xyxy
             cv2.rectangle(image, (int(x1 * width), int(y1 * height)), (int(x2 * width), int(y2 * height)), (40, 220, 40), 2)
@@ -535,8 +760,9 @@ def current_git_commit() -> str:
 
 
 def dataset_fingerprint() -> str:
-    path = DATA_YAML.parent / "fingerprint.json"
-    if not path.exists():
+    candidates = [DATA_YAML.parent / "fingerprint.json", *[parent / "fingerprint.json" for parent in DATA_YAML.parents]]
+    path = next((candidate for candidate in candidates if candidate.exists()), None)
+    if path is None:
         raise FileNotFoundError("Run src.prepare_dataset to create dataset/fingerprint.json")
     payload = json.loads(path.read_text(encoding="utf-8"))
     return str(payload["fingerprint"])
@@ -559,7 +785,9 @@ def apply_profile(args: argparse.Namespace) -> None:
     profile = yaml.safe_load(args.profile.read_text(encoding="utf-8"))
     allowed = {
         "model", "baseline_epochs", "tuned_epochs", "imgsz", "batch", "workers", "patience",
-        "cache", "seed", "run_prefix", "save_period", "amp",
+        "cache", "seed", "run_prefix", "save_period", "amp", "data_view", "experiments",
+        "require_primary_support", "allow_insufficient_support", "bootstrap_samples",
+        "minimum_precision", "tile_inference", "tuning", "require_clinician_review",
     }
     unknown = set(profile) - allowed
     if unknown:
@@ -582,9 +810,6 @@ def train_phase(args: argparse.Namespace, names: list[str], fingerprint: str, co
     model_slug = Path(args.model).stem.replace(".", "_")
     prefix = f"{args.run_prefix.strip('_')}_" if args.run_prefix.strip("_") else ""
     common = {
-        "model_checkpoint": args.model,
-        "imgsz": args.imgsz,
-        "batch": args.batch,
         "device": device,
         "seed": args.seed,
         "workers": args.workers,
@@ -596,19 +821,66 @@ def train_phase(args: argparse.Namespace, names: list[str], fingerprint: str, co
         "dataset_fingerprint": fingerprint,
         "code_commit": code_commit,
     }
-    experiments = [
-        train_experiment(
-            f"{prefix}baseline_{model_slug}", epochs=args.baseline_epochs, augmented=False,
-            data_yaml=base_yaml, train_images=base_images, data_variant="base", **common,
-        ),
-        train_experiment(
-            f"{prefix}medical_aug_{model_slug}", epochs=args.tuned_epochs, augmented=True,
-            data_yaml=augmented_yaml, train_images=augmented_images, data_variant="augmented", **common,
-        ),
+    if args.experiments:
+        experiments = []
+        for specification in args.experiments:
+            variant = str(specification.get("data_variant", "base"))
+            source = runtime / f"{variant}.yaml"
+            if not source.exists():
+                raise FileNotFoundError(f"Training data variant is missing: {source}")
+            runtime_yaml, image_count = create_runtime_data_yaml(
+                source, args.max_train_images, args.seed, f"{variant}_{specification['name']}"
+            )
+            checkpoint = str(specification.get("model", args.model))
+            experiments.append(train_experiment(
+                f"{prefix}{specification['name']}",
+                model_checkpoint=checkpoint,
+                epochs=int(specification.get("epochs", args.tuned_epochs)),
+                imgsz=int(specification.get("imgsz", args.imgsz)),
+                batch=int(specification.get("batch", args.batch)),
+                augmented=variant != "base",
+                data_yaml=runtime_yaml,
+                train_images=image_count,
+                data_variant=variant,
+                training_overrides=dict(specification.get("training", {})),
+                **common,
+            ))
+    else:
+        experiments = [
+            train_experiment(
+                f"{prefix}baseline_{model_slug}", model_checkpoint=args.model,
+                epochs=args.baseline_epochs, imgsz=args.imgsz, batch=args.batch, augmented=False,
+                data_yaml=base_yaml, train_images=base_images, data_variant="base", **common,
+            ),
+            train_experiment(
+                f"{prefix}medical_aug_{model_slug}", model_checkpoint=args.model,
+                epochs=args.tuned_epochs, imgsz=args.imgsz, batch=args.batch, augmented=True,
+                data_yaml=augmented_yaml, train_images=augmented_images, data_variant="augmented", **common,
+            ),
     ]
     map_key = "metrics/mAP50-95(B)"
+    selection_pool = experiments
+    advancement: dict[str, dict[str, Any]] = {}
+    if len(names) == len(PRIMARY_SOURCE_CLASSES) and experiments:
+        baseline = experiments[0]
+        baseline_map = baseline["validation"].get(map_key, 0.0)
+        baseline_recall = baseline["validation"].get("metrics/recall(B)", 0.0)
+        selection_pool = [baseline]
+        advancement[baseline["name"]] = {"advanced": True, "reason": "acceptance baseline"}
+        for candidate in experiments[1:]:
+            candidate_map = candidate["validation"].get(map_key, 0.0)
+            candidate_recall = candidate["validation"].get("metrics/recall(B)", 0.0)
+            map_gate = candidate_map >= baseline_map * 1.02
+            recall_gate = candidate_recall >= baseline_recall - 0.02
+            advanced = map_gate and recall_gate
+            advancement[candidate["name"]] = {
+                "advanced": advanced, "map50_95_relative_to_baseline": candidate_map / max(baseline_map, 1e-12) - 1,
+                "recall_delta": candidate_recall - baseline_recall,
+            }
+            if advanced:
+                selection_pool.append(candidate)
     selected = max(
-        experiments,
+        selection_pool,
         key=lambda experiment: (
             experiment["validation"].get(map_key, float("-inf")),
             experiment["validation"].get("metrics/recall(B)", float("-inf")),
@@ -635,6 +907,7 @@ def train_phase(args: argparse.Namespace, names: list[str], fingerprint: str, co
     selection = {
         "selected_experiment": selected["name"],
         "selection_metric": "validation mAP50-95; validation recall tie-breaker",
+        "advancement_gates": advancement,
         "dataset_fingerprint": fingerprint,
         "code_commit": code_commit,
         "selected_checkpoint_sha256": sha256_file(ARTIFACTS / "best.pt"),
@@ -674,19 +947,30 @@ def test_phase(args: argparse.Namespace, names: list[str], fingerprint: str, cod
 
     base_yaml = DATA_YAML.parent / "runtime" / "base.yaml"
     final_model = YOLO(str(ARTIFACTS / "best.pt"))
-    val_predictions = cache_predictions(final_model, "val", evaluation_imgsz, device)
+    val_predictions = cache_predictions(final_model, "val", evaluation_imgsz, device, args.tile_inference)
     thresholds = [round(value, 2) for value in np.arange(0.05, 0.80, 0.05)]
     threshold_rows, selected_threshold = threshold_analysis(val_predictions, "val", thresholds)
     write_csv(REPORTS / "threshold_analysis.csv", threshold_rows, list(threshold_rows[0]))
     plot_thresholds(threshold_rows)
+    per_class_threshold_rows, selected_thresholds = per_class_threshold_analysis(
+        val_predictions, "val", thresholds, len(names), args.minimum_precision
+    )
+    write_csv(
+        REPORTS / "per_class_threshold_analysis.csv",
+        per_class_threshold_rows,
+        list(per_class_threshold_rows[0]),
+    )
     test_metrics = final_model.val(
         data=str(base_yaml), split="test", imgsz=evaluation_imgsz, batch=args.batch, device=device,
         workers=args.workers, plots=True, project=str(RUNS), name="final_test", exist_ok=True,
     )
     test_standard = {key: float(value) for key, value in test_metrics.results_dict.items()}
-    test_predictions = cache_predictions(final_model, "test", evaluation_imgsz, device)
+    test_predictions = cache_predictions(final_model, "test", evaluation_imgsz, device, args.tile_inference)
     test_custom, class_rows, per_image = aggregate_custom_metrics(
-        test_predictions, "test", selected_threshold, len(names)
+        test_predictions, "test", selected_thresholds, len(names)
+    )
+    bootstrap_intervals = bootstrap_operating_metrics(
+        per_image, REPORTS / "dataset_manifest.csv", len(names), args.bootstrap_samples, args.seed
     )
     maps = list(map(float, getattr(test_metrics.box, "maps", [0.0] * len(names))))
     for row, name, class_map in zip(class_rows, names, maps, strict=False):
@@ -698,13 +982,74 @@ def test_phase(args: argparse.Namespace, names: list[str], fingerprint: str, cod
         ["class_id", "class_name", "support", "evidence_tier", "tp", "fp", "fn", "precision", "recall", "f1", "map50_95"],
     )
     write_csv(REPORTS / "per_image_test_errors.csv", per_image, list(per_image[0]))
-    error_rows = render_examples(test_predictions, per_image, selected_threshold, names, 10)
+    error_rows = render_examples(test_predictions, per_image, selected_thresholds, names, 10)
     write_csv(REPORTS / "error_analysis.csv", error_rows, list(error_rows[0]) if error_rows else ["example"])
+    acceptance: dict[str, Any] | None = None
+    if len(names) == len(PRIMARY_SOURCE_CLASSES):
+        baseline_experiment = next(
+            (item for item in selection["experiments"] if "e0_yolo26s_640" in item["name"]),
+            selection["experiments"][0],
+        )
+        baseline_model = YOLO(str(baseline_experiment["best"]))
+        baseline_imgsz = int(baseline_experiment["imgsz"])
+        baseline_val_predictions = cache_predictions(baseline_model, "val", baseline_imgsz, device)
+        _, baseline_thresholds = per_class_threshold_analysis(
+            baseline_val_predictions, "val", thresholds, len(names), args.minimum_precision
+        )
+        baseline_ultralytics = baseline_model.val(
+            data=str(base_yaml), split="test", imgsz=baseline_imgsz,
+            batch=int(baseline_experiment["batch"]), device=device, workers=args.workers,
+            plots=False, verbose=False,
+        )
+        baseline_predictions = cache_predictions(baseline_model, "test", baseline_imgsz, device)
+        _, baseline_class_rows, baseline_per_image = aggregate_custom_metrics(
+            baseline_predictions, "test", baseline_thresholds, len(names)
+        )
+        baseline_map = float(baseline_ultralytics.results_dict.get("metrics/mAP50-95(B)", 0.0))
+        candidate_map = float(test_standard.get("metrics/mAP50-95(B)", 0.0))
+        baseline_macro = macro_operating_metrics(baseline_class_rows)
+        candidate_macro = macro_operating_metrics(class_rows)
+        paired_intervals = paired_bootstrap_delta(
+            per_image, baseline_per_image, REPORTS / "dataset_manifest.csv",
+            len(names), args.bootstrap_samples, args.seed,
+        )
+        recall_regressions = {
+            names[index]: float(class_rows[index]["recall"]) - float(baseline_class_rows[index]["recall"])
+            for index in range(len(names))
+        }
+        support_payload = json.loads((REPORTS / "pathology_support.json").read_text(encoding="utf-8"))
+        gates = {
+            "support_gate": bool(support_payload.get("support_gate_passed")),
+            "map50_95_relative_gain_at_least_25pct": (
+                (candidate_map - baseline_map) / max(baseline_map, 1e-12) >= 0.25
+            ),
+            "macro_recall_gain_at_least_15_points": candidate_macro["recall"] - baseline_macro["recall"] >= 0.15,
+            "no_class_recall_regression_over_5_points": min(recall_regressions.values(), default=0.0) >= -0.05,
+            "bootstrap_macro_recall_excludes_zero": paired_intervals.get("macro_recall", {}).get("lower_95", -1.0) > 0.0,
+        }
+        acceptance = {
+            "accepted": all(gates.values()), "gates": gates,
+            "baseline_experiment": baseline_experiment["name"],
+            "baseline_map50_95": baseline_map, "candidate_map50_95": candidate_map,
+            "map50_95_relative_gain": (candidate_map - baseline_map) / max(baseline_map, 1e-12),
+            "baseline_macro": baseline_macro, "candidate_macro": candidate_macro,
+            "macro_recall_absolute_gain": candidate_macro["recall"] - baseline_macro["recall"],
+            "per_class_recall_delta": recall_regressions,
+            "paired_patient_bootstrap_delta_95": paired_intervals,
+        }
+        write_json(REPORTS / "acceptance_report.json", acceptance)
     payload = {
         **selection,
         "validation_selected_threshold": selected_threshold,
+        "validation_selected_thresholds": {
+            str(class_id): {"class_name": names[class_id], "threshold": threshold}
+            for class_id, threshold in selected_thresholds.items()
+        },
         "test_ultralytics_metrics": test_standard,
         "test_threshold_metrics_iou50": test_custom,
+        "patient_bootstrap_95": bootstrap_intervals,
+        "tile_inference": args.tile_inference or {"enabled": False},
+        "v2_acceptance": acceptance,
         "checkpoint_sha256": checkpoint_hash,
         "evaluation_imgsz": evaluation_imgsz,
         "test_evaluation_id": stable_fingerprint({
@@ -743,9 +1088,20 @@ def main() -> None:
     parser.add_argument("--save-period", type=int, default=1)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--force-test", action="store_true")
+    parser.add_argument("--data-view")
+    parser.add_argument("--experiments", default=None)
+    parser.add_argument("--require-primary-support", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--require-clinician-review", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--allow-insufficient-support", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--bootstrap-samples", type=int, default=2000)
+    parser.add_argument("--minimum-precision", type=float, default=0.60)
+    parser.add_argument("--tile-inference", default=None)
+    parser.add_argument("--tuning", default=None)
     parser.add_argument("--audit-approval", type=Path, default=ROOT / "reports" / "manual_audit_approval.json")
     args = parser.parse_args()
     apply_profile(args)
+    if args.data_view and args.data_yaml.resolve() == (ROOT / "dataset" / "data.yaml").resolve():
+        args.data_yaml = ROOT / "dataset" / str(args.data_view) / "data.yaml"
     DATA_YAML = args.data_yaml.resolve()
     output_root = args.output_root.resolve()
     RUNS, REPORTS, ARTIFACTS = output_root / "runs", output_root / "reports", output_root / "artifacts"
@@ -756,6 +1112,12 @@ def main() -> None:
     names = load_names(DATA_YAML)
     fingerprint = dataset_fingerprint()
     require_audit_approval(args.audit_approval.resolve(), fingerprint)
+    if args.require_primary_support:
+        require_support_gate(args.audit_approval.resolve().parent / "pathology_support.json", args.allow_insufficient_support)
+    if args.require_clinician_review:
+        require_clinician_review(
+            args.audit_approval.resolve().parent / "pathology_clinician_review.json", fingerprint
+        )
     commit = current_git_commit()
     device = choose_device(args.device)
     if args.phase in {"train", "all"}:

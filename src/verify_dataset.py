@@ -9,6 +9,7 @@ from pathlib import Path
 import yaml
 
 from src.common import IMAGE_EXTENSIONS, write_json
+from src.pathology import PRIMARY_SOURCE_CLASSES, support_failures
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -107,6 +108,44 @@ def main() -> None:
     audit = json.loads((reports / "dataset_audit.json").read_text(encoding="utf-8"))
     if dataset_fingerprint and audit.get("dataset_fingerprint") != dataset_fingerprint:
         failures.append("dataset fingerprint does not match dataset audit")
+
+    pathology = dataset / "views" / "pathology"
+    support_path = reports / "pathology_support.json"
+    if not pathology.exists() or not support_path.exists():
+        failures.append("primary pathology dataset view or support report is missing")
+        pathology_counts: dict[str, dict[str, int]] = {}
+        support_gate_passed = False
+    else:
+        pathology_config = yaml.safe_load((pathology / "data.yaml").read_text(encoding="utf-8"))
+        pathology_class_count = len(pathology_config.get("names", {}))
+        if pathology_class_count != len(PRIMARY_SOURCE_CLASSES):
+            failures.append(
+                f"pathology view: expected {len(PRIMARY_SOURCE_CLASSES)} classes, found {pathology_class_count}"
+            )
+        pathology_counts = {}
+        for split in ("train", "val", "test"):
+            image_stems = {
+                path.stem for path in (pathology / "images" / split).iterdir()
+                if path.suffix.lower() in IMAGE_EXTENSIONS
+            }
+            labels = list((pathology / "labels" / split).glob("*.txt"))
+            if image_stems != {path.stem for path in labels}:
+                failures.append(f"pathology/{split}: image/label stem mismatch")
+            instances = 0
+            for label in labels:
+                for line_number, line in enumerate(label.read_text(encoding="utf-8").splitlines(), start=1):
+                    parts = line.split()
+                    if len(parts) != 5 or not 0 <= int(float(parts[0])) < pathology_class_count:
+                        failures.append(f"{label}:{line_number}: invalid remapped pathology label")
+                    instances += 1
+            pathology_counts[split] = {"images": len(image_stems), "labels": len(labels), "instances": instances}
+        support = json.loads(support_path.read_text(encoding="utf-8"))
+        recalculated_failures = support_failures(
+            support.get("patient_group_support", {}), support.get("minimum_patient_groups", {})
+        )
+        if recalculated_failures != support.get("support_failures", []):
+            failures.append("pathology support report is internally inconsistent")
+        support_gate_passed = not recalculated_failures
     payload = {
         "status": "pass" if not failures else "fail",
         "counts": counts,
@@ -116,6 +155,8 @@ def main() -> None:
         "patient_group_cross_split": patient_leakage,
         "exact_hash_cross_split": exact_hash_leakage,
         "listed_near_duplicate_cross_split": near_leakage,
+        "pathology_counts": pathology_counts,
+        "pathology_support_gate_passed": support_gate_passed,
         "failures": failures,
     }
     write_json(reports / "dataset_verification.json", payload)

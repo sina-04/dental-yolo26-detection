@@ -20,6 +20,7 @@ from PIL import Image, ImageDraw
 import yaml
 
 from src.common import IMAGE_EXTENSIONS, finite_unit, list_images, load_names, opaque_id, sha256_file, stable_fingerprint, write_json
+from src.pathology import DEFAULT_SUPPORT_MINIMUMS, PRIMARY_SOURCE_CLASSES, build_primary_view
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -28,8 +29,8 @@ REPORT_ROOT = PROJECT_ROOT / "reports"
 SEED = 42
 DATASET_HANDLE = "lokisilvres/dental-disease-panoramic-detection-dataset/versions/6"
 GROUPING_VERSION = "panoramic-filename-phash-v2"
-SPLIT_VERSION = "greedy-multilabel-75-15-10-v2"
-SPLIT_TARGETS = {"train": 0.75, "val": 0.15, "test": 0.10}
+SPLIT_VERSION = "greedy-multilabel-70-15-15-v3"
+SPLIT_TARGETS = {"train": 0.70, "val": 0.15, "test": 0.15}
 
 
 def dataset_class_count(path: Path) -> int | None:
@@ -654,6 +655,8 @@ def main() -> None:
             "minority_target_instances": args.minority_target_instances,
             "max_augmentations_per_image": args.max_augmentations_per_image,
         },
+        "primary_pathology_classes": PRIMARY_SOURCE_CLASSES,
+        "primary_support_minimums": DEFAULT_SUPPORT_MINIMUMS,
     }
     panoramic_records, polygon_annotations = collect_source(source_root, len(names))
     publisher_split_overlap = native_split_overlap(panoramic_records)
@@ -733,6 +736,14 @@ def main() -> None:
     } for record in all_records]
     write_csv(args.reports_root / "dataset_manifest.csv", manifest_rows, list(manifest_rows[0]))
 
+    pathology_view = build_primary_view(
+        args.output,
+        args.reports_root,
+        source_classes=PRIMARY_SOURCE_CLASSES,
+        support_minimums=DEFAULT_SUPPORT_MINIMUMS,
+        seed=args.seed,
+    )
+
     near_rows = near_duplicate_rows(near_pairs)
     write_csv(args.reports_root / "near_duplicate_candidates.csv", near_rows, ["left", "right", "distance", "same_patient_group"])
     write_json(args.reports_root / "exact_duplicates_removed.json", exact_duplicates)
@@ -766,6 +777,7 @@ def main() -> None:
         "polygon_annotations_converted": polygon_annotations,
         "augmented_training_images": augmented_count,
         "training_view_counts": training_view_counts,
+        "pathology_view": pathology_view,
         "split_metadata": split_metadata,
         "minority_target_instances": args.minority_target_instances,
         "max_augmentations_per_image": args.max_augmentations_per_image,

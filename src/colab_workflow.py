@@ -7,6 +7,8 @@ import shutil
 import subprocess
 import sys
 
+import yaml
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DATASET_HANDLE = "lokisilvres/dental-disease-panoramic-detection-dataset/versions/6"
@@ -49,7 +51,10 @@ def prepared_dataset_is_valid(dataset: Path, reports: Path, expected_marker: dic
     verification = reports / "dataset_verification.json"
     marker = dataset / ".colab_prepared.json"
     fingerprint = dataset / "fingerprint.json"
-    required = (marker, verification, fingerprint, dataset / "images" / "train", dataset / "runtime" / "base.yaml")
+    required = (
+        marker, verification, fingerprint, dataset / "images" / "train", dataset / "runtime" / "base.yaml",
+        dataset / "views" / "pathology" / "data.yaml", reports / "pathology_support.json",
+    )
     if not all(path.exists() for path in required):
         return False
     try:
@@ -78,6 +83,7 @@ def prepare(
     dataset = PROJECT_ROOT / "dataset"
     reports = PROJECT_ROOT / "reports"
     marker_payload: dict[str, object] = {
+        "preparation_schema": 2,
         "dataset_handle": DATASET_HANDLE,
         "augment_fraction": augment_fraction,
         "minority_target_instances": minority_target_instances,
@@ -111,7 +117,7 @@ def copy_dataset_reports(source: Path, results_root: Path) -> None:
         "class_distribution.csv", "dataset_audit.json", "dataset_manifest.csv",
         "dataset_verification.json", "exact_duplicates_removed.json",
         "near_duplicate_candidates.csv", "manual_audit_status.json",
-        "manual_audit_approval.json",
+        "manual_audit_approval.json", "pathology_support.json", "pathology_clinician_review.json",
     ):
         path = source / name
         if path.exists():
@@ -156,13 +162,39 @@ def run_model_phase(args: argparse.Namespace, dataset: Path, reports: Path, phas
             "Manual annotation audit is not approved for this dataset fingerprint. Review all 31 contact sheets "
             "and run python -m src.approve_audit before training or testing."
         )
+    profile = yaml.safe_load(args.profile.read_text(encoding="utf-8")) or {}
+    data_view = profile.get("data_view")
+    data_yaml = dataset / str(data_view) / "data.yaml" if data_view else dataset / "data.yaml"
+    if not data_yaml.exists():
+        raise FileNotFoundError(f"Configured dataset view is missing: {data_yaml}. Re-run the prepare stage.")
     command = [
         sys.executable, "-m", "src.train_evaluate", "--phase", phase,
-        "--profile", str(args.profile), "--data-yaml", str(dataset / "data.yaml"),
+        "--profile", str(args.profile), "--data-yaml", str(data_yaml),
         "--output-root", str(args.results_root), "--device", "0", "--resume",
     ]
     if phase == "test" and args.force_test:
         command.append("--force-test")
+    run(command)
+
+
+def run_tuning_phase(args: argparse.Namespace, dataset: Path, reports: Path) -> None:
+    require_gpu()
+    args.results_root.mkdir(parents=True, exist_ok=True)
+    copy_dataset_reports(reports, args.results_root)
+    if not audit_is_approved(dataset, reports, args.results_root):
+        raise RuntimeError("Manual annotation audit must be approved before tuning.")
+    profile = yaml.safe_load(args.profile.read_text(encoding="utf-8")) or {}
+    if not profile.get("tuning"):
+        print("Selected profile has no tuning section; skipping tuning stage.", flush=True)
+        return
+    data_view = profile.get("data_view")
+    data_yaml = dataset / str(data_view) / "data.yaml" if data_view else dataset / "data.yaml"
+    command = [
+        sys.executable, "-m", "src.tune_pathology", "--profile", str(args.profile),
+        "--data-yaml", str(data_yaml), "--output-root", str(args.results_root), "--device", "0",
+    ]
+    if args.screen_only:
+        command.append("--screen-only")
     run(command)
 
 
@@ -177,7 +209,7 @@ def generate_report(args: argparse.Namespace, reports: Path) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Staged, resumable panoramic dental YOLO26 workflow for Google Colab.")
-    parser.add_argument("--stage", choices=("prepare", "train", "test", "report", "all"), default="prepare")
+    parser.add_argument("--stage", choices=("prepare", "train", "tune", "test", "report", "all"), default="prepare")
     parser.add_argument("--data-root", type=Path, default=Path("/content/dental_yolo26_data"))
     parser.add_argument("--results-root", type=Path, default=DEFAULT_RESULTS_ROOT)
     parser.add_argument("--profile", type=Path, default=DEFAULT_PROFILE)
@@ -187,6 +219,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--rebuild-data", action="store_true")
     parser.add_argument("--force-test", action="store_true")
+    parser.add_argument("--screen-only", action="store_true", help="Run tuning trials without full finalists.")
     return parser
 
 
@@ -204,10 +237,12 @@ def main() -> None:
             args.data_root, args.augment_fraction, args.minority_target_instances,
             args.max_augmentations_per_image, args.seed, args.rebuild_data,
         )
-    if args.stage in {"train", "test", "all"} and not prepared_dataset_is_valid(dataset, reports):
+    if args.stage in {"train", "tune", "test", "all"} and not prepared_dataset_is_valid(dataset, reports):
         raise RuntimeError("The dataset is not prepared and verified. Run with --stage prepare first.")
     if args.stage in {"train", "all"}:
         run_model_phase(args, dataset, reports, "train")
+    if args.stage in {"tune", "all"}:
+        run_tuning_phase(args, dataset, reports)
     if args.stage in {"test", "all"}:
         run_model_phase(args, dataset, reports, "test")
     if args.stage in {"report", "all"}:

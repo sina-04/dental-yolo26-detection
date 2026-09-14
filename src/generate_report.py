@@ -33,7 +33,19 @@ def main() -> None:
     audit_reports = args.dataset_reports_root.resolve()
     audit = read_json(audit_reports / "dataset_audit.json")
     final = read_json(reports / "final_metrics.json")
-    experiments = read_csv(reports / "experiments.csv")
+    experiments = []
+    for item in final["experiments"]:
+        values = item.get("validation", {})
+        experiments.append({
+            "experiment": item["name"], "model": item.get("model", "YOLO26"),
+            "main_change": item.get("augmentation", item.get("data_variant", "base")),
+            "epochs": item.get("epochs_completed", item.get("epochs_requested", 0)),
+            "precision": values.get("metrics/precision(B)", 0.0),
+            "recall": values.get("metrics/recall(B)", 0.0),
+            "map50": values.get("metrics/mAP50(B)", 0.0),
+            "map50_95": values.get("metrics/mAP50-95(B)", 0.0),
+            "selected": item["name"] == final["selected_experiment"],
+        })
     class_rows = [row for row in read_csv(audit_reports / "class_distribution.csv") if row["split"] == "all"]
     per_class = read_csv(reports / "per_class_test_metrics.csv")
     errors = read_csv(reports / "error_analysis.csv")
@@ -54,6 +66,22 @@ def main() -> None:
     compute_profile = "full-data" if base_executed >= base_available and augmented_executed >= augmented_available else "compute-limited"
     test = final["test_ultralytics_metrics"]
     custom = final["test_threshold_metrics_iou50"]
+    pathology_mode = len(per_class) == 6
+    task_description = (
+        "a primary six-class pathology detector while preserving the 31-class source benchmark"
+        if pathology_mode else "a 31-class object detector"
+    )
+    threshold_description = (
+        "per-class validation-selected thresholds"
+        if final.get("validation_selected_thresholds")
+        else f"the validation-selected threshold of {final['validation_selected_threshold']:.2f}"
+    )
+    acceptance = final.get("v2_acceptance")
+    acceptance_text = (
+        f"The v2 acceptance gate is **{'passed' if acceptance.get('accepted') else 'not passed'}**. "
+        "See `reports/acceptance_report.json` for every criterion and paired patient-bootstrap interval."
+        if acceptance else "The legacy 31-class run does not use the v2 pathology acceptance gate."
+    )
 
     experiment_table = "\n".join(
         f"| {row['experiment']} | {row['model']} | {row['main_change']} | {int(float(row['epochs']))} | {percentage(float(row['precision']))} | {percentage(float(row['recall']))} | {float(row['map50']):.4f} | {float(row['map50_95']):.4f} | {row['selected']} |"
@@ -81,9 +109,11 @@ def main() -> None:
 
 ## Executive summary
 
-This project uses only the 31-class Dental X-Ray Panoramic Dataset to build a YOLO26 object detector. Segmentation polygons are converted to axis-aligned detection boxes when present. Patient/exam groups inferred from filenames are hashed before being written to processed manifests, and no inferred patient group crosses train, validation, and test splits.
+This project uses only the Dental X-Ray Panoramic Dataset to build {task_description}. Segmentation polygons are converted to axis-aligned detection boxes when present. Patient/exam groups inferred from filenames are hashed before being written to processed manifests, and no inferred patient group crosses train, validation, and test splits.
 
-The selected model is **{final['selected_experiment']}**, chosen only by validation mAP50-95. Its held-out test mAP50-95 is **{test.get('metrics/mAP50-95(B)', 0.0):.4f}**, mAP50 is **{test.get('metrics/mAP50(B)', 0.0):.4f}**, precision is **{test.get('metrics/precision(B)', 0.0):.4f}**, and recall is **{test.get('metrics/recall(B)', 0.0):.4f}**. At the validation-selected confidence threshold of **{final['validation_selected_threshold']:.2f}**, the custom IoU=0.50 test F1 is **{custom['f1']:.4f}**.
+The selected model is **{final['selected_experiment']}**, chosen only by validation mAP50-95. Its held-out test mAP50-95 is **{test.get('metrics/mAP50-95(B)', 0.0):.4f}**, mAP50 is **{test.get('metrics/mAP50(B)', 0.0):.4f}**, precision is **{test.get('metrics/precision(B)', 0.0):.4f}**, and recall is **{test.get('metrics/recall(B)', 0.0):.4f}**. At {threshold_description}, the custom IoU=0.50 test F1 is **{custom['f1']:.4f}**.
+
+{acceptance_text}
 
 The executed **{compute_profile}** profile used **{base_executed:,}/{base_available:,} baseline-view images** and **{augmented_executed:,}/{augmented_available:,} augmented-view images**. Validation and test sets remained complete. Hardware and software details are recorded below so local and Colab runs can be compared without conflating their compute budgets.
 
@@ -120,7 +150,7 @@ Automatic QC checked image decodability, missing/malformed labels, class ranges,
 
 ## Split strategy
 
-The pipeline reconstructs splits from inferred patient/exam groups instead of trusting the publisher-provided Roboflow split. Tokens likely to identify a patient are normalized, immediately hashed, and never written in clear text to the processed manifest. A deterministic greedy multilabel group allocation targets 75% train, 15% validation, and 10% test while reducing class-distribution drift. Exact visual duplicates are removed before splitting; identical perceptual hashes are grouped and near-duplicate candidates are listed for review.
+The pipeline reconstructs splits from inferred patient/exam groups instead of trusting the publisher-provided Roboflow split. Tokens likely to identify a patient are normalized, immediately hashed, and never written in clear text to the processed manifest. A deterministic greedy multilabel group allocation targets 70% train, 15% validation, and 15% test while reducing class-distribution drift. Exact visual duplicates are removed before splitting; identical perceptual hashes are grouped and near-duplicate candidates are listed for review.
 
 Because patient identifiers were inferred from filenames rather than verified against a clinical master index, patient separation is best-effort and remains a limitation.
 
@@ -152,7 +182,7 @@ The held-out test set was evaluated once after experiment selection. Ultralytics
 - Recall/sensitivity: **{test.get('metrics/recall(B)', 0.0):.4f}**
 - mAP50: **{test.get('metrics/mAP50(B)', 0.0):.4f}**
 - mAP50-95: **{test.get('metrics/mAP50-95(B)', 0.0):.4f}**
-- Validation-selected threshold: **{final['validation_selected_threshold']:.2f}**
+- Operating thresholds: **{threshold_description}**
 - Thresholded test F1 at IoU 0.50: **{custom['f1']:.4f}**
 - Thresholded TP / FP / FN: **{custom['tp']} / {custom['fp']} / {custom['fn']}**
 

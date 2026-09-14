@@ -6,8 +6,11 @@ import tempfile
 import unittest
 
 from src.colab_workflow import audit_is_approved, build_parser, download_dataset, prepared_dataset_is_valid
+from src.balanced_trainer import GroupAwareBatchSampler
 from src.common import stable_fingerprint
 from src.infer import resolve_confidence
+from src.inference_utils import apply_class_thresholds, merge_detections, tile_windows
+from src.pathology import PRIMARY_SOURCE_CLASSES, remap_boxes, require_clinician_review, support_failures
 from src.prepare_dataset import (
     Box,
     Record,
@@ -21,7 +24,7 @@ from src.prepare_dataset import (
     resolve_dataset_root,
     write_training_views,
 )
-from src.train_evaluate import require_audit_approval, support_tier
+from src.train_evaluate import bootstrap_operating_metrics, require_audit_approval, support_tier
 
 
 class PipelineTests(unittest.TestCase):
@@ -100,7 +103,10 @@ class PipelineTests(unittest.TestCase):
             (dataset / "images" / "train").mkdir(parents=True)
             (dataset / "runtime").mkdir()
             (dataset / "runtime" / "base.yaml").write_text("names: []\n", encoding="utf-8")
+            (dataset / "views" / "pathology").mkdir(parents=True)
+            (dataset / "views" / "pathology" / "data.yaml").write_text("names: []\n", encoding="utf-8")
             reports.mkdir()
+            (reports / "pathology_support.json").write_text("{}", encoding="utf-8")
             (reports / "dataset_verification.json").write_text('{"status":"pass"}', encoding="utf-8")
             (dataset / "fingerprint.json").write_text('{"fingerprint":"abc"}', encoding="utf-8")
             self.assertFalse(prepared_dataset_is_valid(dataset, reports))
@@ -171,6 +177,68 @@ class PipelineTests(unittest.TestCase):
             metrics.write_text('{"validation_selected_threshold":0.35}', encoding="utf-8")
             self.assertEqual(0.35, resolve_confidence(None, metrics))
             self.assertEqual(0.5, resolve_confidence(0.5, metrics))
+
+    def test_primary_pathology_labels_are_contiguous_and_other_classes_become_negatives(self) -> None:
+        lines = [
+            "0 0.5 0.5 0.1 0.1",
+            "7 0.4 0.4 0.2 0.2",
+            "3 0.2 0.2 0.1 0.1",
+            "13 0.6 0.6 0.2 0.2",
+        ]
+        remapped = remap_boxes(lines, PRIMARY_SOURCE_CLASSES)
+        self.assertEqual(["0", "1", "5"], [line.split()[0] for line in remapped])
+
+    def test_patient_support_gate_reports_every_missing_split(self) -> None:
+        support = {"Caries": {"train": 200, "val": 49, "test": 50}}
+        self.assertEqual(["Caries/val: 49 patient groups; requires 50"], support_failures(support))
+
+    def test_clinician_review_is_bound_to_dataset_fingerprint(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            review = Path(directory) / "review.json"
+            review.write_text('{"status":"approved","dataset_fingerprint":"current"}', encoding="utf-8")
+            self.assertEqual("approved", require_clinician_review(review, "current")["status"])
+            with self.assertRaises(RuntimeError):
+                require_clinician_review(review, "changed")
+
+    def test_group_aware_sampler_never_repeats_patient_inside_batch(self) -> None:
+        groups = ["rare", "common1", "common2", "common3", "common4"]
+        classes = [{0}, {1}, {1}, {1}, {1}]
+        sampler = GroupAwareBatchSampler(groups, classes, batch_size=3, seed=42, max_repeat=4)
+        batches = list(sampler)
+        for batch in batches:
+            self.assertEqual(len(batch), len({groups[index] for index in batch}))
+        sampled_groups = [groups[index] for batch in batches for index in batch]
+        self.assertGreater(sampled_groups.count("rare"), sampled_groups.count("common1"))
+
+    def test_hybrid_tiles_cover_image_edges_and_fuse_same_class(self) -> None:
+        windows = tile_windows(1600, 800, count=3, overlap=0.25)
+        self.assertEqual(0, windows[0][0])
+        self.assertEqual(1600, windows[-1][2])
+        detections = [
+            {"class_id": 0, "confidence": 0.9, "xyxy": [10.0, 10.0, 30.0, 30.0], "source_view": "full"},
+            {"class_id": 0, "confidence": 0.8, "xyxy": [11.0, 10.0, 31.0, 30.0], "source_view": "tile_1"},
+            {"class_id": 1, "confidence": 0.7, "xyxy": [10.0, 10.0, 30.0, 30.0], "source_view": "tile_1"},
+        ]
+        merged = merge_detections(detections, 0.5)
+        self.assertEqual(2, len(merged))
+        self.assertEqual(["full", "tile_1"], merged[0]["sources"])
+        selected = apply_class_thresholds(merged, {0: 0.85, 1: 0.75})
+        self.assertEqual([0], [item["class_id"] for item in selected])
+
+    def test_patient_bootstrap_returns_macro_intervals(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = Path(directory) / "manifest.csv"
+            manifest.write_text(
+                "image_id,patient_group_hash\na,p1\nb,p2\n",
+                encoding="utf-8",
+            )
+            rows = [
+                {"image_id": "a", "class_0_tp": 1, "class_0_fp": 0, "class_0_fn": 0},
+                {"image_id": "b", "class_0_tp": 0, "class_0_fp": 1, "class_0_fn": 1},
+            ]
+            intervals = bootstrap_operating_metrics(rows, manifest, class_count=1, samples=50, seed=42)
+        self.assertIn("macro_recall", intervals)
+        self.assertLessEqual(intervals["macro_recall"]["lower_95"], intervals["macro_recall"]["upper_95"])
 
     def test_support_tiers_are_explicit(self) -> None:
         self.assertEqual("N/E", support_tier(0))
