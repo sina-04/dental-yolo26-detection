@@ -49,6 +49,7 @@ Preparation performs:
 - exact SHA-256 deduplication;
 - perceptual-hash grouping of identical and near-duplicate images;
 - privacy-hashed filename-derived exam grouping;
+- explicit warning that some upstream radiographs contain burned-in patient text;
 - deterministic multilabel group splitting;
 - train-only augmentation with no synthetic validation/test images;
 - isolated `base` and `augmented` training manifests;
@@ -58,6 +59,8 @@ Preparation performs:
 - five-image annotation contact sheets for every class.
 
 Training is blocked until a reviewer inspects all 31 contact sheets and records approval for the current dataset fingerprint. The strict pathology profile additionally requires a qualified clinician to confirm review of all primary-class validation/test annotations and model-mined errors. Changing the source manifest, class order, split/grouping version, seed, or augmentation settings changes the fingerprint and invalidates stale approvals and run resumptions.
+
+Opaque processed filenames protect identifiers present in source filenames, but they do **not** de-identify text embedded in image pixels. The visual audit found burned-in patient information in some upstream radiographs. Keep raw images and generated contact sheets out of Git, restrict their storage and access, and perform a qualified privacy review plus pixel-level redaction before redistributing images or using them beyond this controlled research workflow.
 
 ## Project structure
 
@@ -208,7 +211,7 @@ Tests cover label conversion/remapping, privacy-preserving grouping, near-duplic
 
 ## Limitations
 
-The public secondary dataset has uncertain demographics, acquisition hardware, sampling, annotation protocol, and patient metadata. Its taxonomy mixes pathology, treatments, devices, anatomy, and tooth state. Polygon conversion loses shape. The current public data fails the strict primary-class independent-patient support gate, so additional clinician-reviewed examinations are required before final v2 training. There is no external-site, prospective, calibration, fairness, robustness, reader-study, regulatory, or clinical-utility validation.
+The public secondary dataset has uncertain demographics, acquisition hardware, sampling, annotation protocol, and patient metadata, and some source images contain burned-in identifiers. Its taxonomy mixes pathology, treatments, devices, anatomy, and tooth state. Polygon conversion loses shape. The current public data fails the strict primary-class independent-patient support gate, so additional clinician-reviewed examinations are required before final v2 training. There is no external-site, prospective, calibration, fairness, robustness, reader-study, regulatory, or clinical-utility validation.
 
 False negatives can miss disease and false positives can create unnecessary concern. All labels and failure cases require qualified dental-clinician review before any further applied research.
 

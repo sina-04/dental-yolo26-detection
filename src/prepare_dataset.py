@@ -784,7 +784,11 @@ def main() -> None:
         "issue_counts": dict(issue_counts),
         "images_after_exact_deduplication": len(all_records),
         "instances": sum(len(record.boxes) for record in all_records),
-        "raw_filename_privacy": "Raw panoramic filenames may contain identifying text. Processed filenames and manifests use opaque IDs only.",
+        "raw_filename_privacy": (
+            "Raw panoramic filenames and image pixels may contain identifying text. Processed filenames and manifests "
+            "use opaque IDs, but pixel contents are not de-identified; do not redistribute images or audit sheets "
+            "without qualified privacy review and redaction."
+        ),
         "manual_audit_status": "pending",
         "manual_audit_samples_per_class": audit_sample_counts,
     }
