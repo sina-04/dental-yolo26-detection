@@ -42,7 +42,14 @@ def download_dataset(handle: str, destination: Path) -> Path:
     import kagglehub
 
     resolved = Path(kagglehub.dataset_download(handle, output_dir=str(destination)))
-    marker.write_text(handle + "\n", encoding="utf-8")
+    if not resolved.is_dir():
+        raise FileNotFoundError(f"KaggleHub returned a missing dataset directory: {resolved}")
+    # Colab may satisfy ``output_dir`` from KaggleHub's shared cache and return
+    # that cache path without creating ``destination``. Bind the marker to the
+    # directory that actually contains the data; a marker-only destination
+    # would make a later run reuse an empty directory.
+    resolved_marker = resolved / ".codex_complete"
+    resolved_marker.write_text(handle + "\n", encoding="utf-8")
     print(f"Downloaded {handle} to {resolved}", flush=True)
     return resolved
 

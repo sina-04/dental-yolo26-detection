@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 from src.colab_workflow import audit_is_approved, build_parser, download_dataset, prepared_dataset_is_valid
 from src.balanced_trainer import GroupAwareBatchSampler
@@ -258,6 +261,26 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(destination, resolved)
             self.assertTrue((destination / ".complete").is_dir())
             self.assertEqual("owner/dataset/versions/1\n", (destination / ".codex_complete").read_text(encoding="utf-8"))
+
+    def test_colab_cache_marker_is_written_to_resolved_dataset(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            destination = root / "requested" / "dataset"
+            cached = root / "kagglehub-cache"
+            cached.mkdir()
+            cached.joinpath("data.yaml").write_text("names: []\n", encoding="utf-8")
+            cached.joinpath("image.jpg").write_bytes(b"image")
+            fake_kagglehub = SimpleNamespace(dataset_download=lambda *_args, **_kwargs: str(cached))
+
+            with patch.dict(sys.modules, {"kagglehub": fake_kagglehub}):
+                resolved = download_dataset("owner/dataset/versions/1", destination)
+
+            self.assertEqual(cached, resolved)
+            self.assertFalse(destination.exists())
+            self.assertEqual(
+                "owner/dataset/versions/1\n",
+                (cached / ".codex_complete").read_text(encoding="utf-8"),
+            )
 
 
 if __name__ == "__main__":
