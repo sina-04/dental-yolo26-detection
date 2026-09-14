@@ -49,7 +49,12 @@ def download_dataset(handle: str, destination: Path) -> Path:
     # directory that actually contains the data; a marker-only destination
     # would make a later run reuse an empty directory.
     resolved_marker = resolved / ".codex_complete"
-    resolved_marker.write_text(handle + "\n", encoding="utf-8")
+    try:
+        resolved_marker.write_text(handle + "\n", encoding="utf-8")
+    except OSError:
+        if resolved == destination:
+            raise
+        print(f"KaggleHub cache is read-only; skipping marker in {resolved}", flush=True)
     print(f"Downloaded {handle} to {resolved}", flush=True)
     return resolved
 

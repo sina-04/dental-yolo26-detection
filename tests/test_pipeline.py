@@ -282,6 +282,29 @@ class PipelineTests(unittest.TestCase):
                 (cached / ".codex_complete").read_text(encoding="utf-8"),
             )
 
+    def test_colab_read_only_cache_does_not_require_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            destination = root / "requested" / "dataset"
+            cached = root / "kagglehub-cache"
+            cached.mkdir()
+            fake_kagglehub = SimpleNamespace(dataset_download=lambda *_args, **_kwargs: str(cached))
+            original_write_text = Path.write_text
+
+            def reject_cache_marker(path: Path, *args: object, **kwargs: object) -> int:
+                if path == cached / ".codex_complete":
+                    raise OSError("read-only cache")
+                return original_write_text(path, *args, **kwargs)
+
+            with (
+                patch.dict(sys.modules, {"kagglehub": fake_kagglehub}),
+                patch.object(Path, "write_text", reject_cache_marker),
+            ):
+                resolved = download_dataset("owner/dataset/versions/1", destination)
+
+            self.assertEqual(cached, resolved)
+            self.assertFalse(destination.exists())
+
 
 if __name__ == "__main__":
     unittest.main()
