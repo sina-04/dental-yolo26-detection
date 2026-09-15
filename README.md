@@ -8,9 +8,25 @@ A reproducible Ultralytics YOLO26 object-detection project for panoramic dental 
 
 ## Current status
 
-The completed v1 YOLO26s run reached held-out mAP50 **0.1663**, mAP50-95 **0.0889**, precision **0.6567**, and recall **0.1891**. At the validation-selected operating point its F1 was **0.6899**. These results are not clinically usable.
+The completed v1 YOLO26s run reached held-out mAP50 **0.1663**, mAP50-95 **0.0889**, precision **0.6567**, and recall **0.1891**. At the validation-selected operating point its F1 was **0.6899**.
 
-The v2 workflow targets `Caries`, `Periapical lesion`, `Retained root`, `Root Piece`, `impacted tooth`, and `Bone Loss`. It adds higher-resolution/model-capacity ablations, patient-balanced sampling, validation-only tuning, per-class thresholds, patient-bootstrap intervals, and hybrid full-image/tile inference. New v2 metrics are not claimed until its frozen test phase finishes.
+The completed exploratory v2 comparison selected **E1: YOLO26s at 1024 px** on validation data. Its one-time held-out test produced Ultralytics precision **0.4573**, recall **0.2878**, mAP50 **0.2684**, and mAP50-95 **0.1278**. With validation-selected per-class confidence thresholds at IoU 0.50, micro precision was **0.6759**, recall **0.7900**, and F1 **0.7285**. These are detection metrics, not classification accuracy.
+
+The public data still fails the strict independent-patient support gate, and performance is strongly class-imbalanced. The result remains exploratory and is not clinically usable.
+
+## Held-out test confusion matrix
+
+These are the unmodified Ultralytics plots emitted by the final test pass for the selected E1 checkpoint. Rows are predicted classes and columns are true classes. The last row contains missed ground-truth objects (false negatives); the last column contains detections that did not match a ground-truth object (false positives). The normalized view is normalized within each true-class column.
+
+### Count matrix
+
+![Held-out test confusion matrix with counts](docs/results/confusion_matrix.png)
+
+### Column-normalized matrix
+
+![Normalized held-out test confusion matrix](docs/results/confusion_matrix_normalized.png)
+
+The matrix makes the imbalance explicit: `impacted tooth` has 3,949 correct matches out of 4,207 labels (93.9%), while the diagonal match rates are 33.7% for `Caries`, 11.9% for `Periapical lesion`, 0% for `Retained root`, 56.8% for `Root Piece`, and 10.0% for `Bone Loss`. Consequently, the strong majority-class result must not be described as greater-than-95% model accuracy.
 
 ## Dataset
 
@@ -72,6 +88,8 @@ Opaque processed filenames protect identifiers present in source filenames, but 
 │   └── pathology_a100_exploratory.yaml
 ├── dataset/
 │   └── data.yaml                 # public 31-class ontology template
+├── docs/
+│   └── results/                  # frozen held-out confusion matrices
 ├── notebooks/
 │   └── dental_yolo26_colab.ipynb # staged prepare/audit/train/test/report run
 ├── src/
