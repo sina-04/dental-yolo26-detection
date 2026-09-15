@@ -9,7 +9,7 @@ import unittest
 from unittest.mock import patch
 
 from src.colab_workflow import audit_is_approved, build_parser, download_dataset, prepared_dataset_is_valid
-from src.balanced_trainer import GroupAwareBatchSampler
+from src.balanced_trainer import GroupAwareBatchSampler, GroupAwareIndexSampler
 from src.common import stable_fingerprint
 from src.infer import resolve_confidence
 from src.inference_utils import apply_class_thresholds, merge_detections, tile_windows
@@ -212,6 +212,21 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(len(batch), len({groups[index] for index in batch}))
         sampled_groups = [groups[index] for batch in batches for index in batch]
         self.assertGreater(sampled_groups.count("rare"), sampled_groups.count("common1"))
+
+    def test_group_aware_index_sampler_keeps_numeric_loader_batch_size(self) -> None:
+        from ultralytics.data.build import InfiniteDataLoader
+
+        groups = ["rare", "common1", "common2", "common3", "common4"]
+        classes = [{0}, {1}, {1}, {1}, {1}]
+        batches = GroupAwareBatchSampler(groups, classes, batch_size=3, seed=42, max_repeat=4)
+        sampler = GroupAwareIndexSampler(batches)
+        loader = InfiniteDataLoader(dataset=list(range(len(groups))), batch_size=3, sampler=sampler)
+
+        self.assertEqual(3, loader.batch_size)
+        self.assertEqual(len(sampler), len(loader.sampler))
+        epoch_batches = [batch.tolist() for _, batch in zip(range(len(loader)), loader)]
+        for batch in epoch_batches:
+            self.assertEqual(len(batch), len({groups[index] for index in batch}))
 
     def test_hybrid_tiles_cover_image_edges_and_fuse_same_class(self) -> None:
         windows = tile_windows(1600, 800, count=3, overlap=0.25)

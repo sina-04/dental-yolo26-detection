@@ -89,6 +89,26 @@ class GroupAwareBatchSampler(Sampler[list[int]]):
             yield batch
 
 
+class GroupAwareIndexSampler(Sampler[int]):
+    """Flatten patient-unique batches for a standard DataLoader batch size.
+
+    Passing ``batch_sampler`` directly makes PyTorch expose ``batch_size=None``.
+    Ultralytics 8.4.x expects a numeric ``train_loader.batch_size`` while it
+    builds the training pipeline, so let DataLoader recreate the same batch
+    boundaries from this flattened index stream instead.
+    """
+
+    def __init__(self, batch_sampler: GroupAwareBatchSampler) -> None:
+        self.batch_sampler = batch_sampler
+
+    def __len__(self) -> int:
+        return self.batch_sampler.sample_count
+
+    def __iter__(self) -> Iterator[int]:
+        for batch in self.batch_sampler:
+            yield from batch
+
+
 class PatientBalancedDetectionTrainer(DetectionTrainer):
     """Single-GPU Ultralytics trainer with patient-unique weighted batches."""
 
@@ -107,13 +127,16 @@ class PatientBalancedDetectionTrainer(DetectionTrainer):
             {int(value) for value in np.asarray(label.get("cls", [])).reshape(-1).tolist()}
             for label in dataset.labels
         ]
-        sampler = GroupAwareBatchSampler(groups, classes, batch_size, seed=_SEED, max_repeat=4)
-        workers = min(self.args.workers, max(0, len(sampler) - 1))
+        batch_sampler = GroupAwareBatchSampler(groups, classes, batch_size, seed=_SEED, max_repeat=4)
+        sampler = GroupAwareIndexSampler(batch_sampler)
+        workers = min(self.args.workers, max(0, len(batch_sampler) - 1))
         generator = torch.Generator()
         generator.manual_seed(_SEED)
         return InfiniteDataLoader(
             dataset=dataset,
-            batch_sampler=sampler,
+            batch_size=batch_size,
+            sampler=sampler,
+            drop_last=False,
             num_workers=workers,
             collate_fn=getattr(dataset, "collate_fn", None),
             worker_init_fn=seed_worker,

@@ -206,7 +206,19 @@ def train_experiment(
     if manifest_path.exists():
         existing_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         if existing_manifest != manifest:
-            raise RuntimeError(f"Refusing incompatible resume for {name}; use a new run prefix or results root")
+            existing_inputs = {key: value for key, value in existing_manifest.items() if key not in {"code_commit", "fingerprint"}}
+            current_inputs = {key: value for key, value in manifest.items() if key not in {"code_commit", "fingerprint"}}
+            same_inputs = existing_inputs == current_inputs
+            has_training_state = existing_last.exists() or results_csv.exists() or (run_dir / "weights" / "best.pt").exists()
+            if same_inputs and already_complete:
+                # Preserve the commit that actually trained this completed run.
+                manifest = existing_manifest
+            elif same_inputs and not has_training_state:
+                # A setup-time failure produced no checkpoint or metrics. It is
+                # safe to retry that run with the repaired implementation.
+                write_json(manifest_path, manifest)
+            else:
+                raise RuntimeError(f"Refusing incompatible resume for {name}; use a new run prefix or results root")
     elif run_dir.exists() and any(run_dir.iterdir()):
         raise RuntimeError(f"Existing run {name} has no compatibility manifest")
     else:
